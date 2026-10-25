@@ -61,6 +61,12 @@ git push -u origin chore/car-project-layout
 
 提交前执行 ./tools/test-chassis.sh、CAR_TEST_SANITIZE=1 ./tools/test-chassis.sh、./tools/build.sh，并检查 git diff --check。此步骤不导入炮塔、不恢复自动全量 CI、不改变 v0。合并后再从更新的 dev 创建 feat/turret-control。
 
+## 第五步：炮塔控制
+
+分支为 feat/turret-control，从已合并底盘的 dev 创建，PR 仍到 dev。范围是默认禁用的软弹机构、独立实体确认、有限次可取消推弹、可选俯仰舵机、全局停车接入和无硬件测试，详见 [炮塔控制](turret-control.md)。新增状态机和驱动适配按当前取消规则重写，没有直接恢复旧准备代码中无法中止的延迟发射任务。
+
+提交前执行 ./tools/test-turret.sh、./tools/test-chassis.sh，并使用 CAR_TEST_SANITIZE=1 运行两套测试；完成默认禁用和临时启用配置的固件编译。测试与构建不代表实物发射已通过。不要提交生成的 sdkconfig 或临时接线配置，不恢复全自动 CI，不移动 v0。合并后从更新的 dev 创建 docs/product-and-architecture，收尾产品、架构、组装和演示文档。
+
 ## 后续模块与发布节点
 
 第三步 `feat/linx-integration` 单独提交灵矽默认接入地址、配置来源/设备身份日志和配网绑定说明，PR 仍以 `dev` 为目标。更新 defaults 后用新的有效配置完成本地构建；公开入口可达只算预检查，不代表设备绑定、语音或 MCP 已验收。合并后再从最新 `dev` 创建 `fix/chassis-control`。

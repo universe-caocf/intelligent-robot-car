@@ -34,8 +34,10 @@ fi
   -include "$project_dir/tests/chassis/adapter_stubs/settings.h" \
   -include "$project_dir/tests/chassis/adapter_stubs/config.h" \
   -I "$project_dir/tests/chassis/adapter_stubs" -I "$project_dir/tests/chassis/stubs" \
+  -I "$project_dir/tests/turret/stubs" \
   -I "$project_dir/firmware/main" -I "$cjson_dir" \
   "$project_dir/tests/chassis/adapter_test.cc" "$project_dir/firmware/main/motor_control.cc" \
+  "$project_dir/firmware/main/turret_controller.cc" \
   "$scratch_dir/cJSON.o" -o "$scratch_dir/adapter_test"
 "$scratch_dir/adapter_test"
 node "$project_dir/tests/chassis/browser_test.js" "$project_dir/firmware/main/web_server/web_server.cc"

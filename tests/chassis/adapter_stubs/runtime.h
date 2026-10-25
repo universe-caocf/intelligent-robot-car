@@ -17,7 +17,12 @@ inline int fail_channel = -1, fail_duty_channel = -1, task_creations = 0;
 inline bool fail_stop = false;
 inline void (*task_entry)(void*) = nullptr;
 inline void* task_arg = nullptr;
-inline std::array<uint32_t, 4> duties{};
+inline std::array<uint32_t, 49> duties{};
+inline std::array<int, 49> input_levels{};
+inline int gpio_calls = 0, fail_gpio_pin = -1, fail_update_channel = -1;
+inline bool fail_gpio_once = false;
+inline std::vector<std::pair<int, int>> timer_configs;
+inline std::vector<int> configured_channels;
 inline std::vector<std::pair<int, uint32_t>> writes;
 inline std::map<std::string, int> nvs;
 inline int nvs_writes = 0;
@@ -33,26 +38,38 @@ inline int64_t esp_timer_get_time() { return test_now * 1000; }
 inline void Tick(int64_t now) { test_now = now; try { task_entry(task_arg); } catch (const EndIteration&) {} }
 using gpio_num_t = int;
 constexpr int GPIO_MODE_OUTPUT = 1;
-inline esp_err_t gpio_reset_pin(int) { return ESP_OK; }
-inline esp_err_t gpio_set_direction(int, int) { return ESP_OK; }
-inline esp_err_t gpio_set_level(int pin, int value) { duties.at(pin) = value; writes.emplace_back(pin, value); return ESP_OK; }
+inline esp_err_t gpio_reset_pin(int) { ++gpio_calls; return ESP_OK; }
+inline esp_err_t gpio_set_direction(int, int) { ++gpio_calls; return ESP_OK; }
+inline int gpio_get_level(int pin) { ++gpio_calls; return input_levels.at(pin); }
+inline esp_err_t gpio_set_level(int pin, int value) {
+    ++gpio_calls;
+    if (pin == fail_gpio_pin) { if (fail_gpio_once) fail_gpio_pin = -1; return ESP_FAIL; }
+    duties.at(pin) = value; writes.emplace_back(pin, value); return ESP_OK;
+}
 enum ledc_mode_t { LEDC_LOW_SPEED_MODE };
-enum ledc_channel_t { LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3 };
-constexpr int LEDC_TIMER_0 = 0, LEDC_TIMER_10_BIT = 10, LEDC_AUTO_CLK = 0;
+enum ledc_channel_t { LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_CHANNEL_4, LEDC_CHANNEL_5 };
+constexpr int LEDC_TIMER_0 = 0, LEDC_TIMER_2 = 2, LEDC_TIMER_10_BIT = 10, LEDC_TIMER_14_BIT = 14, LEDC_AUTO_CLK = 0;
 struct ledc_timer_config_t { ledc_mode_t speed_mode; int duty_resolution, timer_num, freq_hz, clk_cfg; };
 struct ledc_channel_config_t { int gpio_num; ledc_mode_t speed_mode; ledc_channel_t channel; int timer_sel; uint32_t duty; };
-inline esp_err_t ledc_timer_config(const ledc_timer_config_t*) { return fail_timer ? ESP_FAIL : ESP_OK; }
+inline esp_err_t ledc_timer_config(const ledc_timer_config_t* config) {
+    timer_configs.emplace_back(config->timer_num, config->duty_resolution);
+    return fail_timer ? ESP_FAIL : ESP_OK;
+}
 inline esp_err_t ledc_channel_config(const ledc_channel_config_t* config) {
+    configured_channels.push_back(config->channel);
     return config->channel == fail_channel ? ESP_FAIL : ESP_OK;
 }
 inline esp_err_t ledc_set_duty(ledc_mode_t, ledc_channel_t channel, uint32_t value) {
     if ((value > 0 && channel == fail_duty_channel) || (value == 0 && fail_stop)) return ESP_FAIL;
     duties.at(channel) = value; writes.emplace_back(channel, value); return ESP_OK;
 }
-inline esp_err_t ledc_update_duty(ledc_mode_t, ledc_channel_t) { return ESP_OK; }
+inline esp_err_t ledc_update_duty(ledc_mode_t, ledc_channel_t channel) { return channel == fail_update_channel ? ESP_FAIL : ESP_OK; }
 inline esp_err_t ledc_stop(ledc_mode_t, ledc_channel_t channel, int) { duties.at(channel) = 0; return ESP_OK; }
 inline void ResetRuntime() {
     test_now = 0; fail_task = fail_timer = fail_stop = false;
     fail_channel = fail_duty_channel = -1; task_creations = 0;
     task_entry = nullptr; task_arg = nullptr; duties = {}; writes.clear(); nvs.clear(); nvs_writes = 0;
+    gpio_calls = 0; fail_gpio_pin = fail_update_channel = -1; fail_gpio_once = false;
+    timer_configs.clear(); configured_channels.clear();
+    input_levels.fill(1);
 }
