@@ -43,8 +43,16 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
-    if (url.empty()) {
+    const bool has_device_override = !url.empty();
+    if (!has_device_override) {
         url = CONFIG_OTA_URL;
+    }
+    // 旧设备的 NVS 地址优先于固件默认值；只记录来源，不输出可能含凭据的 URL。
+    ESP_LOGI(TAG, "OTA endpoint source: %s; board: %s; Wi-Fi STA MAC: %s",
+        has_device_override ? "device override (wifi/ota_url)" : "firmware default (CONFIG_OTA_URL)",
+        BOARD_NAME, SystemInfo::GetMacAddress().c_str());
+    if (has_device_override && url != CONFIG_OTA_URL) {
+        ESP_LOGW(TAG, "Saved OTA endpoint differs from firmware default; check provisioning settings if switching platforms");
     }
     return url;
 }
