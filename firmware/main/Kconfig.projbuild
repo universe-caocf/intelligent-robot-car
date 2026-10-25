@@ -2,9 +2,10 @@ menu "Intelligent Robot Car"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://api.tenclass.net/xiaozhi/ota/"
+    default "https://xrobo.qiniuapi.com/v1/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
+        A non-empty wifi/ota_url saved on the device overrides this default.
 
 choice
     prompt "Flash Assets"

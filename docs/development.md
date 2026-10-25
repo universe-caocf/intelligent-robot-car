@@ -57,6 +57,8 @@ git push -u origin chore/car-project-layout
 
 ## 后续模块与发布节点
 
+第三步 `feat/linx-integration` 单独提交灵矽默认接入地址、配置来源/设备身份日志和配网绑定说明，PR 仍以 `dev` 为目标。更新 defaults 后用新的有效配置完成本地构建；公开入口可达只算预检查，不代表设备绑定、语音或 MCP 已验收。合并后再从最新 `dev` 创建 `fix/chassis-control`。
+
 | 顺序 | 分支 | 工作范围 |
 | --- | --- | --- |
 | 1 | `chore/build-tooling` | 工程入口、锁文件、基础说明 |
