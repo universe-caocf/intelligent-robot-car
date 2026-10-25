@@ -4,7 +4,8 @@
 
 ```text
 firmware/
-  main/boards/intelligent-car/  小车接线、板级初始化、原有动作工具
+  main/boards/intelligent-car/  小车接线、板级初始化、MCP 工具
+  main/motor_control.h/.cc     底盘状态机、执行器与设备适配
   main/boards/common/          公共板级、配网、驱动与电源支持
   main/audio/                  录音、播放、音频处理和唤醒
   main/protocols/              MQTT / WebSocket 通信
@@ -32,7 +33,7 @@ docs/reference/                上游小车硬件说明与笔记（历史参考�
 - 板型配置符号改为 `CONFIG_BOARD_TYPE_INTELLIGENT_CAR`，板型/板名宏改为 `intelligent-car`。构建系统只接受 ESP32-S3。
 - 配网热点前缀由 `Xiaozhi` 改为 `RobotCar`，便于找到自己的小车。
 - 板型标识会出现在设备上报信息中，云端是否识别该类型及 OTA 返回是否匹配，需要接入和实机阶段核验。项目名称调整不代表已有设备和云端已完成迁移。
-- 电机引脚、默认动作参数、MCP 工具名称、协议字段和 NVS 设置键保持原状态。OTA 默认地址在第三步改为灵矽入口；已刷过旧固件的设备可能保留 NVS 覆盖配置，不能只看 defaults 判断设备实际使用的地址。
+- 第二步没有改变电机引脚、默认动作参数、MCP 工具名称、协议字段和 NVS 设置键。第四步保留引脚及工具名称，调整默认参数、取消语义和情绪工具行为，见 [底盘说明](chassis-control.md)。OTA 默认地址在第三步改为灵矽入口；已刷过旧固件的设备可能保留 NVS 覆盖配置，不能只看 defaults 判断设备实际使用的地址。
 
 `xiaozhi-fonts` 组件名、唤醒模型名、协议和部分配置标识用于兼容外部组件，继续保留。版权、许可证和真实来源也继续保留，不能为了项目改名而统一替换。
 

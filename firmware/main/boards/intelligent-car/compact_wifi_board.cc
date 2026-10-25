@@ -24,6 +24,7 @@ extern "C" void HandleMotorActionForEmotion(const char* emotion);
 #include <esp_lcd_panel_vendor.h>
 #include <utility>
 #include <string>
+#include <stdexcept>
 
 #ifdef SH1106
 #include <esp_lcd_panel_sh1106.h>
@@ -168,249 +169,78 @@ private:
         // Add motor control tools to MCP server
         auto& mcp_server = McpServer::GetInstance();
 
-        mcp_server.AddTool("self.motor.move_forward",
-            "Move the robot forward with specified speed and duration.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "  `duration_ms`: Movement duration in milliseconds, default 5000\n"
-            "Return:\n"
-            "  Success message with parameters",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100),
-                Property("duration_ms", kPropertyTypeInteger, 5000, 100, 10000)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                int duration = properties["duration_ms"].value<int>();
-                MotorMoveForward(duration, speed);
-                return std::string("Moved forward at ") + std::to_string(speed) + "% speed for " + std::to_string(duration) + "ms";
+        // -1 是“使用当前保存配置”的缺省标记；每次调用时读取，网页修改后立即生效。
+        struct MovementTool {
+            const char* name;
+            int direction;
+            int car::MotorActionConfig::*duration;
+        };
+        const MovementTool movements[] = {
+            {"move_forward", 4, &car::MotorActionConfig::forward_duration_ms},
+            {"move_backward", 2, &car::MotorActionConfig::backward_duration_ms},
+            {"turn_left", 3, &car::MotorActionConfig::left_turn_duration_ms},
+            {"turn_right", 1, &car::MotorActionConfig::right_turn_duration_ms},
+            {"spin_around", 3, &car::MotorActionConfig::spin_duration_ms},
+            {"quick_forward", 4, &car::MotorActionConfig::quick_forward_duration_ms},
+            {"quick_backward", 2, &car::MotorActionConfig::quick_backward_duration_ms},
+        };
+        for (const auto& movement : movements) {
+            mcp_server.AddTool(std::string("self.motor.") + movement.name,
+                "Start a timed movement, replacing any previous movement. "
+                "speed_percent: -1 uses saved speed, 0 stops, otherwise 1..100. "
+                "duration_ms: -1 uses saved duration, otherwise 100..10000ms. "
+                "Returns accepted only; no measured distance, angle or completion feedback.",
+                PropertyList({
+                    Property("speed_percent", kPropertyTypeInteger, -1, -1, 100),
+                    Property("duration_ms", kPropertyTypeInteger, -1, -1, car::kMaxDurationMs)
+                }),
+                [movement](const PropertyList& properties) -> ReturnValue {
+                    auto& app = Application::GetInstance();
+                    auto config = app.GetMotorActionConfig();
+                    int speed = properties["speed_percent"].value<int>();
+                    int duration = properties["duration_ms"].value<int>();
+                    if (speed == -1) speed = config.default_speed_percent;
+                    if (duration == -1) duration = config.*(movement.duration);
+                    if (!app.HandleMotorActionWithDuration(movement.direction, speed, duration)) {
+                        throw std::runtime_error("Movement rejected: check parameters, network and self.motor.get_status");
+                    }
+                    return std::string("Accepted ") + movement.name + " speed=" + std::to_string(speed) +
+                        " duration_ms=" + std::to_string(duration) + "; physical completion unverified";
+                });
+        }
+        for (const std::string pattern : {"wiggle", "dance"}) {
+            mcp_server.AddTool("self.motor." + pattern,
+                "Start a cancellable movement sequence. speed_percent: -1 uses saved speed; 0 stops; 1..100. "
+                "New movement or stop cancels all remaining steps. Returns accepted, not physical completion.",
+                PropertyList({Property("speed_percent", kPropertyTypeInteger, -1, -1, 100)}),
+                [pattern](const PropertyList& properties) -> ReturnValue {
+                    auto& app = Application::GetInstance();
+                    int speed = properties["speed_percent"].value<int>();
+                    if (speed == -1) speed = app.GetMotorActionConfig().default_speed_percent;
+                    if (!app.HandleMotorPattern(pattern, speed)) throw std::runtime_error("Motor sequence rejected");
+                    return "Accepted " + pattern + "; physical completion unverified";
+                });
+        }
+        mcp_server.AddTool("self.motor.stop", "Stop chassis output and cancel all remaining movement steps",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                if (!Application::GetInstance().HandleMotorActionWithDuration(0, 0, 0))
+                    throw std::runtime_error("Stop requested but motor hardware fault is latched; check status");
+                return std::string("Chassis output stopped and pending steps canceled; no physical feedback sensor");
+            });
+        mcp_server.AddTool("self.motor.get_status", "Get commanded chassis state; this is not measured physical motion",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                return Application::GetInstance().GetMotorStatus();
             });
 
-        mcp_server.AddTool("self.motor.move_backward",
-            "Move the robot backward with specified speed and duration.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "  `duration_ms`: Movement duration in milliseconds, default 5000\n"
-            "Return:\n"
-            "  Success message with parameters",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100),
-                Property("duration_ms", kPropertyTypeInteger, 5000, 100, 10000)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                int duration = properties["duration_ms"].value<int>();
-                MotorMoveBackward(duration, speed);
-                return std::string("Moved backward at ") + std::to_string(speed) + "% speed for " + std::to_string(duration) + "ms";
-            });
-
-        mcp_server.AddTool("self.motor.spin_around",
-            "Spin the robot around in a full circle with specified speed.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "Return:\n"
-            "  Success message",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                MotorSpinAround(speed);
-                return std::string("Spin around completed at ") + std::to_string(speed) + "% speed";
-            });
-
-        mcp_server.AddTool("self.motor.turn_left",
-            "Turn the robot left with specified speed and duration.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "  `duration_ms`: Turn duration in milliseconds, default 600 (approx 90 degrees)\n"
-            "Return:\n"
-            "  Success message with parameters",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100),
-                Property("duration_ms", kPropertyTypeInteger, 600, 100, 5000)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                int duration = properties["duration_ms"].value<int>();
-                MotorTurnLeftDuration(duration, speed);
-                return std::string("Turned left at ") + std::to_string(speed) + "% speed for " + std::to_string(duration) + "ms";
-            });
-
-        mcp_server.AddTool("self.motor.turn_right",
-            "Turn the robot right with specified speed and duration.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "  `duration_ms`: Turn duration in milliseconds, default 600 (approx 90 degrees)\n"
-            "Return:\n"
-            "  Success message with parameters",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100),
-                Property("duration_ms", kPropertyTypeInteger, 600, 100, 5000)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                int duration = properties["duration_ms"].value<int>();
-                MotorTurnRightDuration(duration, speed);
-                return std::string("Turned right at ") + std::to_string(speed) + "% speed for " + std::to_string(duration) + "ms";
-            });
-
-        mcp_server.AddTool("self.motor.quick_forward",
-            "Quick forward movement for 0.5 seconds with specified speed.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "Return:\n"
-            "  Success message",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                MotorQuickForward(speed);
-                return std::string("Quick forward movement completed at ") + std::to_string(speed) + "% speed";
-            });
-
-        mcp_server.AddTool("self.motor.quick_backward",
-            "Quick backward movement for 0.5 seconds with specified speed.\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "Return:\n"
-            "  Success message",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                MotorQuickBackward(speed);
-                return std::string("Quick backward movement completed at ") + std::to_string(speed) + "% speed";
-            });
-
-        mcp_server.AddTool("self.motor.wiggle",
-            "Make the robot perform a quick wiggle movement (turn right briefly).\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "Return:\n"
-            "  Success message",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                MotorWiggle(speed);
-                return std::string("Wiggle movement completed at ") + std::to_string(speed) + "% speed";
-            });
-
-        mcp_server.AddTool("self.motor.dance",
-            "Make the robot perform a quick dance movement (move forward briefly).\n"
-            "Args:\n"
-            "  `speed_percent`: Motor speed (0-100), default 100\n"
-            "Return:\n"
-            "  Success message",
-            PropertyList({
-                Property("speed_percent", kPropertyTypeInteger, 100, 0, 100)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed_percent"].value<int>();
-                MotorDance(speed);
-                return std::string("Dance movement completed at ") + std::to_string(speed) + "% speed";
-            });
-
-        mcp_server.AddTool("self.motor.stop",
-            "Stop all motor movement immediately",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForApplication(0, 0, 0, 2); // Stop, high priority
-                return std::string("Motor stopped");
-            });
-
-        // Animation actions
-        mcp_server.AddTool("self.motor.wake_up",
-            "Play wake up animation - excited movement to greet the user",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("wake");
-                return std::string("Wake up animation played");
-            });
-
-        mcp_server.AddTool("self.motor.happy",
-            "Play happy animation - playful movements to show joy",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("happy");
-                return std::string("Happy animation played");
-            });
-
-        mcp_server.AddTool("self.motor.sad",
-            "Play sad animation - slow backward movements to show sadness",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("sad");
-                return std::string("Sad animation played");
-            });
-
-        mcp_server.AddTool("self.motor.thinking",
-            "Play thinking animation - small left-right movements",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("thinking");
-                return std::string("Thinking animation played");
-            });
-
-        mcp_server.AddTool("self.motor.listening",
-            "Play listening animation - gentle swaying movements",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("listening");
-                return std::string("Listening animation played");
-            });
-
-        mcp_server.AddTool("self.motor.speaking",
-            "Play speaking animation - forward thrusts",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("speaking");
-                return std::string("Speaking animation played");
-            });
-
-        mcp_server.AddTool("self.motor.excited",
-            "Play excited animation - fast movements in multiple directions",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("excited");
-                return std::string("Excited animation played");
-            });
-
-        mcp_server.AddTool("self.motor.loving",
-            "Play loving animation - gentle forward movements",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("loving");
-                return std::string("Loving animation played");
-            });
-
-        mcp_server.AddTool("self.motor.angry",
-            "Play angry animation - strong backward and forward movements",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("angry");
-                return std::string("Angry animation played");
-            });
-
-        mcp_server.AddTool("self.motor.surprised",
-            "Play surprised animation - quick backward then forward movement",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("surprised");
-                return std::string("Surprised animation played");
-            });
-
-        mcp_server.AddTool("self.motor.confused",
-            "Play confused animation - hesitant left-right movements",
-            PropertyList(),
-            [](const PropertyList& properties) -> ReturnValue {
-                HandleMotorActionForEmotion("confused");
-                return std::string("Confused animation played");
-            });
+        // 保留已有工具名称兼容客户端，但情绪工具只更新屏幕，不驱动车轮。
+        for (const std::string emotion : {"wake_up", "happy", "sad", "thinking", "listening", "speaking",
+                "excited", "loving", "angry", "surprised", "confused"}) {
+            mcp_server.AddTool("self.motor." + emotion, "Update display emotion only. Does not move the chassis.",
+                PropertyList(), [emotion](const PropertyList&) -> ReturnValue {
+                    HandleMotorActionForEmotion(emotion.c_str());
+                    return std::string("Display update scheduled; chassis unchanged");
+                });
+        }
 
         mcp_server.AddTool("self.network.get_ip",
             "获取当前WiFi IP地址信息，用于语音播报或状态查询",
@@ -428,93 +258,6 @@ private:
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
-    }
-
-    // Unified motor control through Application (single PWM system)
-    void MotorMoveForward(int duration_ms = 5000, uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(4, speed_percent, duration_ms, 2); // 4 = forward, high priority
-    }
-
-    void MotorMoveBackward(int duration_ms = 5000, uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(2, speed_percent, duration_ms, 2); // 2 = backward, high priority
-    }
-
-    void MotorTurnLeft(int duration_ms = 300, uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(3, speed_percent, duration_ms, 2); // 3 = left, high priority
-    }
-
-    void MotorTurnRight(int duration_ms = 300, uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(1, speed_percent, duration_ms, 2); // 1 = right, high priority
-    }
-
-    // Alias for compatibility
-    void MotorTurnLeftDuration(int duration_ms = 600, uint8_t speed_percent = 100) {
-        MotorTurnLeft(duration_ms, speed_percent);
-    }
-
-    void MotorTurnRightDuration(int duration_ms = 600, uint8_t speed_percent = 100) {
-        MotorTurnRight(duration_ms, speed_percent);
-    }
-
-    void MotorStop() {
-        HandleMotorActionForApplication(0, 0, 0, 2); // 0 = stop, high priority
-    }
-
-    void MotorSpinAround(uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(3, speed_percent, 2000, 2); // Spin = turn left longer, high priority
-    }
-
-    void MotorQuickForward(uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(4, speed_percent, 500, 2); // Quick forward, high priority
-    }
-
-    void MotorQuickBackward(uint8_t speed_percent = 100) {
-        HandleMotorActionForApplication(2, speed_percent, 500, 2); // Quick backward, high priority
-    }
-
-    void MotorWiggle(uint8_t speed_percent = 100) {
-        // Simple wiggle - just a quick left-right movement for MCP calls
-        // Since MCP calls are synchronous, we can't use delays
-        HandleMotorActionForApplication(1, speed_percent, 300, 2); // right turn, high priority
-    }
-
-public:
-    void MotorDance(uint8_t speed_percent = 100) {
-        ESP_LOGI(TAG, "电机跳舞: 执行完整的舞蹈序列 (速度: %d%%)", speed_percent);
-
-        // 舞蹈序列：前进 -> 左转 -> 右转 -> 后退 -> 前进 -> 左转 -> 右转 -> 结束
-        // 使用高优先级确保舞蹈动作不被其他动作打断
-
-        // 第一步：快速前进
-        HandleMotorActionForApplication(4, speed_percent, 300, 2); // forward
-        vTaskDelay(pdMS_TO_TICKS(350));
-
-        // 第二步：左转
-        HandleMotorActionForApplication(3, speed_percent, 250, 2); // left
-        vTaskDelay(pdMS_TO_TICKS(300));
-
-        // 第三步：右转
-        HandleMotorActionForApplication(1, speed_percent, 250, 2); // right
-        vTaskDelay(pdMS_TO_TICKS(300));
-
-        // 第四步：后退
-        HandleMotorActionForApplication(2, speed_percent, 300, 2); // backward
-        vTaskDelay(pdMS_TO_TICKS(350));
-
-        // 第五步：前进
-        HandleMotorActionForApplication(4, speed_percent, 200, 2); // forward
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        // 第六步：左转
-        HandleMotorActionForApplication(3, speed_percent, 200, 2); // left
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        // 第七步：右转
-        HandleMotorActionForApplication(1, speed_percent, 200, 2); // right
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        // 第八步：最终前进结束舞蹈
-        HandleMotorActionForApplication(4, speed_percent, 400, 2); // forward
     }
 
 public:
@@ -543,158 +286,25 @@ public:
         return display_;
     }
 
-    // Motor control interface for different emotions and actions
-    void OnWakeUp() {
-        ESP_LOGI(TAG, "电机情感: 唤醒被触发 - 执行兴奋动作");
-        PerformMotorAction(1, 300); // FORWARD for 300ms - 兴奋的前进动作
-    }
 
-    void OnHappy() {
-        ESP_LOGI(TAG, "电机情感: 开心被触发 - 执行欢快动作");
-        PerformMotorAction(1, 200); // FORWARD for 200ms - 简单的开心动作
-        vTaskDelay(pdMS_TO_TICKS(100));
-        PerformMotorAction(3, 200); // LEFT for 200ms - 左转表示开心
-    }
-
-    void OnSad() {
-        ESP_LOGI(TAG, "电机情感: 悲伤被触发 - 执行缓慢动作");
-        PerformMotorAction(2, 400); // BACKWARD for 400ms - 缓慢后退表示悲伤
-    }
-
-    void OnThinking() {
-        ESP_LOGI(TAG, "电机情感: 思考被触发 - 执行轻微动作");
-        PerformMotorAction(3, 150); // LEFT for 150ms - 轻微左转表示思考
-        vTaskDelay(pdMS_TO_TICKS(200));
-        PerformMotorAction(4, 150); // RIGHT for 150ms - 右转表示思考
-    }
-
-    void OnListening() {
-        ESP_LOGI(TAG, "电机情感: 倾听被触发 - 执行轻柔动作");
-        PerformMotorAction(3, 100); // LEFT for 100ms - 轻柔左转
-        vTaskDelay(pdMS_TO_TICKS(150));
-        PerformMotorAction(4, 100); // RIGHT for 100ms - 右转表示倾听
-    }
-
-    void OnSpeaking() {
-        ESP_LOGI(TAG, "电机情感: 说话被触发 - 执行前进动作");
-        PerformMotorAction(1, 250); // FORWARD for 250ms - 前进表示说话
-    }
-
-    void OnExcited() {
-        ESP_LOGI(TAG, "电机情感: 兴奋被触发 - 执行快速动作");
-        PerformMotorAction(1, 150); // FORWARD for 150ms - 快速前进
-        vTaskDelay(pdMS_TO_TICKS(50));
-        PerformMotorAction(3, 150); // LEFT for 150ms - 快速左转
-        vTaskDelay(pdMS_TO_TICKS(50));
-        PerformMotorAction(4, 150); // RIGHT for 150ms - 快速右转
-    }
-
-    void OnLoving() {
-        ESP_LOGI(TAG, "电机情感: 爱慕被触发 - 执行温柔动作");
-        PerformMotorAction(1, 300); // FORWARD for 300ms - 温柔前进
-        vTaskDelay(pdMS_TO_TICKS(200));
-        PerformMotorAction(3, 200); // LEFT for 200ms - 轻柔左转
-    }
-
-    void OnAngry() {
-        ESP_LOGI(TAG, "电机情感: 生气被触发 - 执行强烈动作");
-        PerformMotorAction(2, 200); // BACKWARD for 200ms - 后退表示生气
-        vTaskDelay(pdMS_TO_TICKS(100));
-        PerformMotorAction(1, 200); // FORWARD for 200ms - 前冲表示生气
-    }
-
-    void OnSurprised() {
-        ESP_LOGI(TAG, "电机情感: 惊讶被触发 - 执行突然动作");
-        PerformMotorAction(2, 100); // BACKWARD for 100ms - 快速后退
-        vTaskDelay(pdMS_TO_TICKS(150));
-        PerformMotorAction(1, 200); // FORWARD for 200ms - 前进表示惊讶
-    }
-
-    void OnConfused() {
-        ESP_LOGI(TAG, "电机情感: 困惑被触发 - 执行犹豫动作");
-        PerformMotorAction(3, 100); // LEFT for 100ms - 犹豫左转
-        vTaskDelay(pdMS_TO_TICKS(200));
-        PerformMotorAction(4, 100); // RIGHT for 100ms - 犹豫右转
-        vTaskDelay(pdMS_TO_TICKS(200));
-        PerformMotorAction(3, 100); // LEFT for 100ms - 再次犹豫
-    }
-
-    void OnIdle() {
-        if ((esp_random() % 100) < 50) { // 5% chance for random movement
-            ESP_LOGI(TAG, "电机空闲: 随机动作被触发 (5%概率)");
-            // Simple random movement using Application's motor control
-            int random_action = (esp_random() % 4) + 1; // 1-4 for different directions
-            HandleMotorActionForApplication(random_action, 60, 500, 0); // 60% speed, 500ms duration, low priority
-        }
-    }
-
-    // 电机动作执行函数实现 - 使用Application的统一PWM系统
-    void PerformMotorAction(int action, int duration_ms) {
-        uint8_t speed_percent = 80; // 使用80%的速度进行情感表达动作
-
-        // Emotion actions use medium priority (1) - can be interrupted by MCP commands (2) but not by lower priority
-        switch (action) {
-            case 1: // FORWARD
-                HandleMotorActionForApplication(4, speed_percent, duration_ms, 1);
-                break;
-            case 2: // BACKWARD
-                HandleMotorActionForApplication(2, speed_percent, duration_ms, 1);
-                break;
-            case 3: // LEFT
-                HandleMotorActionForApplication(3, speed_percent, duration_ms, 1);
-                break;
-            case 4: // RIGHT
-                HandleMotorActionForApplication(1, speed_percent, duration_ms, 1);
-                break;
-            default:
-                break;
-        }
-    }
 };
 
-// Public wrapper functions for motor control
+// 兼容旧工具名称，动作语义已改为显示；不会在回调里延迟或生成后续行驶。
 extern "C" void HandleMotorActionForEmotion(const char* emotion) {
-    auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
-    if (emotion) {
-        std::string emotion_str(emotion);
-        if (emotion_str == "happy" || emotion_str == "joy") {
-            board->OnHappy();
-        } else if (emotion_str == "excited") {
-            board->OnExcited();
-        } else if (emotion_str == "sad" || emotion_str == "unhappy") {
-            board->OnSad();
-        } else if (emotion_str == "thinking") {
-            board->OnThinking();
-        } else if (emotion_str == "confused") {
-            board->OnConfused();
-        } else if (emotion_str == "listening" || emotion_str == "curious") {
-            board->OnListening();
-        } else if (emotion_str == "speaking" || emotion_str == "talking") {
-            board->OnSpeaking();
-        } else if (emotion_str == "wake" || emotion_str == "wakeup") {
-            board->OnWakeUp();
-        } else if (emotion_str == "loving") {
-            board->OnLoving();
-        } else if (emotion_str == "angry") {
-            board->OnAngry();
-        } else if (emotion_str == "surprised") {
-            board->OnSurprised();
-        } else {
-            ESP_LOGW(TAG, "Unknown emotion: %s", emotion_str.c_str());
-        }
-    }
+    if (!emotion) return;
+    std::string value = emotion;
+    if (value == "wake" || value == "wake_up") value = "sleepy";
+    else if (value == "happy") value = "laughing";
+    else if (value == "sad") value = "crying";
+    else if (value == "excited") value = "shocked";
+    else if (value == "loving") value = "kissy";
+    Application::GetInstance().Schedule([value]() { Board::GetInstance().GetDisplay()->SetEmotion(value.c_str()); });
 }
 
-// Global function for idle motor movements
-extern "C" void HandleMotorIdleAction(void) {
-    auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
-    board->OnIdle();
-}
-
-// Global function for dance motor action
 extern "C" void HandleMotorActionForDance(uint8_t speed_percent) {
-    auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
-    board->MotorDance(speed_percent);
+    if (!Application::GetInstance().HandleMotorPattern("dance", speed_percent)) {
+        throw std::runtime_error("Motor dance rejected");
+    }
 }
 
 DECLARE_BOARD(CompactWifiBoard);

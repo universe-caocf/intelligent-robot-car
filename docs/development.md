@@ -55,6 +55,12 @@ git push -u origin chore/car-project-layout
 
 删除文件较多是本步骤的预期结果，但仍需检查范围、目录重命名和许可证保留情况。PR 合并后按前述方式更新 `dev`，再创建 `feat/linx-integration`；此时不需要直接合入 `main`。
 
+## 第四步：底盘控制
+
+分支为 fix/chassis-control，仍从最新 dev 创建并 PR 到 dev。范围包括统一动作执行器、动作替换和停止、网页心跳租约、故障反馈、共享配置，以及关闭自动情绪移动。实现、兼容变化和到货后验收清单见 [底盘控制说明](chassis-control.md)。主机测试直接编译生产状态机、HTTP 与设备适配代码，并执行内嵌网页脚本；这些不等于真实硬件验收。
+
+提交前执行 ./tools/test-chassis.sh、CAR_TEST_SANITIZE=1 ./tools/test-chassis.sh、./tools/build.sh，并检查 git diff --check。此步骤不导入炮塔、不恢复自动全量 CI、不改变 v0。合并后再从更新的 dev 创建 feat/turret-control。
+
 ## 后续模块与发布节点
 
 第三步 `feat/linx-integration` 单独提交灵矽默认接入地址、配置来源/设备身份日志和配网绑定说明，PR 仍以 `dev` 为目标。更新 defaults 后用新的有效配置完成本地构建；公开入口可达只算预检查，不代表设备绑定、语音或 MCP 已验收。合并后再从最新 `dev` 创建 `fix/chassis-control`。
