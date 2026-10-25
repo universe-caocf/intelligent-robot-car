@@ -1,0 +1,28 @@
+name: Firmware build
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  esp32s3:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell scripts
+        shell: bash
+        run: bash -n tools/build.sh tools/install-esp-idf.sh
+      - name: Build car firmware
+        shell: bash
+        run: ./tools/build.sh

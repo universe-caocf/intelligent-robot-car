@@ -6,7 +6,7 @@ ESP-IDF 是乐鑫 ESP32 的开发框架和编译工具链，本项目固定使�
 
 `sdkconfig.defaults*` 是可共享的默认配置，`sdkconfig` 是 ESP-IDF 生成的本机有效配置，已有有效配置优先于默认值。因此不能只添加 defaults 就认为旧构建目录会自动切换板型。
 
-本项目入口在上游 defaults 基础上叠加 `tools/sdkconfig.defaults.qebabe`，明确选择 **ESP32-S3 / Qebabe Xiaoche / SSD1306 128×64**。ESP-IDF 还会加载基础 defaults 对应的 `.esp32s3` 文件。此预设用于构建验证，不代表实际硬件已经匹配；OTA 地址和固件功能仍是上游状态，灵矽预置在后续 PR 导入。
+本项目入口在上游 defaults 基础上叠加 `tools/sdkconfig.defaults.car`，明确选择 **ESP32-S3 / Intelligent Robot Car / SSD1306 128×64**。ESP-IDF 还会加载基础 defaults 对应的 `.esp32s3` 文件。板级源码位于 `firmware/main/boards/intelligent-car/`，沿用原 Qebabe 小车引脚；实际硬件是否匹配仍需核对。OTA 地址和动作逻辑仍是上游状态，灵矽预置在后续 PR 导入。
 
 ## 首次安装
 
@@ -27,7 +27,7 @@ IDF_PATH=/absolute/path/to/esp-idf ./tools/build.sh
 
 Linux 请按 [ESP-IDF v5.5.1 官方入门文档](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/index.html) 安装系统依赖和工具链，再通过 `IDF_PATH` 使用同一 Bash 构建入口。Windows 建议使用 WSL2 构建；本步骤只验证 macOS，其他系统与 USB 转发未验证。
 
-首次编译会下载托管组件和资源。输出包括 `firmware/build/xiaozhi.bin`、引导程序、分区表、资源镜像与烧录参数。当前仍使用上游项目名，改名属于下一步。以后再次运行同一命令会增量编译。
+首次编译会下载托管组件和资源。输出包括 `firmware/build/intelligent_robot_car.bin`、引导程序、分区表、资源镜像与烧录参数。以后再次运行同一命令会增量编译。此前版本生成的 `xiaozhi.bin` 不再是当前固件输出名。
 
 ## 有硬件后烧录
 
@@ -48,6 +48,8 @@ CAR_PORT=/dev/cu.usbmodemXXXX ./tools/build.sh monitor
 
 `./tools/build.sh menuconfig` 可打开配置菜单。共享配置变化应整理到受版本管理的默认配置中；不要提交生成的 `sdkconfig` 或账号、token、Wi-Fi 密码。当前入口会拒绝其他芯片、板型和屏幕配置，避免“编译成功但选错板”。
 
+从第一步升级时，旧 `CONFIG_BOARD_TYPE_QEBABE_XIAOCHE` 已改为 `CONFIG_BOARD_TYPE_INTELLIGENT_CAR`，预设文件也已改名。请先按下方步骤备份旧 `sdkconfig` 和 `build/`，再重新生成配置；不要直接在旧配置中猜测修改符号。新配网热点前缀为 `RobotCar`，云端设备类型标识也随板型改为 `intelligent-car`，相关注册与 OTA 兼容性需在接入阶段核验。
+
 如果提示配置不符合预设，先检查 `firmware/sdkconfig` 中的 `CONFIG_IDF_TARGET`、`CONFIG_BOARD_TYPE_*` 和 `CONFIG_OLED_*`。确实需要重新从 defaults 生成时，保留旧文件再构建：
 
 ```bash
@@ -62,7 +64,7 @@ if [ -d firmware/build ]; then mv firmware/build "$backup_dir/"; fi
 
 网络失败先检查完整错误日志和组件站点连接，不要首先删除 `dependencies.lock`。锁文件应随显式依赖变更在独立 PR 中更新。上游固件还有编译警告，构建通过不能证明运行逻辑正确。
 
-## 本步骤验证记录（2026-10-25）
+## 第一步构建工具验证记录（2026-10-25，历史记录）
 
 - macOS、ESP-IDF v5.5.1，通过 `./tools/build.sh` 从新生成的配置和构建目录完成编译与链接。
 - 生成配置确认目标为 ESP32-S3、Qebabe Xiaoche、SSD1306 128×64；OTA URL 仍为上游地址。
@@ -71,3 +73,5 @@ if [ -d firmware/build ]; then mv firmware/build "$backup_dir/"; fi
 - 复用已有托管组件缓存，锁文件未被构建改写；没有验证全新联网下载全部组件，也没有重新运行系统安装脚本。
 - 固件功能源码保持 v0 内容；已有弃用 API、宏重定义和未使用变量等编译警告仍在。
 - 未烧录设备，未验证灵矽绑定、音频、屏幕、电机、供电或发射机构；Linux/Windows 未验证。
+
+第二步改名与裁剪后的构建验证见 [工程验证记录](repository.md#第二步验证记录2026-10-25)，当前产物为 `intelligent_robot_car.bin`。

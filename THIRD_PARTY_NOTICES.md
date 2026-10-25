@@ -7,7 +7,7 @@
 - 来源：[Rakonx/xiaozhi-esp32-car](https://github.com/Rakonx/xiaozhi-esp32-car)。
 - 原始提交：`94969e50e892fecc3f682385fb6a88163271154a`，导入过程见 [CODEBASE.md](CODEBASE.md)。
 - 主体原始许可为 MIT，完整文本保留在 [firmware/LICENSE](firmware/LICENSE)，包含 Shenzhen Xinzhi Future Technology Co., Ltd. 和 Project Contributors 的版权声明。
-- 本步骤仅增加工程工具、构建预设、依赖锁文件及文档，并调整锁文件的忽略规则；未改写固件功能。
+- 本项目目前增加了工程工具、构建预设、依赖锁文件和文档，并完成单板型裁剪、项目/板型改名与配网热点前缀调整。灵矽预置、底盘控制修正与炮塔尚未导入。完整导入基线保留在 `v0`；裁剪后的路径见 [工程说明](docs/repository.md)。
 
 ## 嵌入的第三方源码
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# 统一从仓库入口编译原有小车板型；不自动清除配置或猜测烧录串口。
+# 统一从仓库入口编译本项目小车板型；不自动清除配置或猜测烧录串口。
 set -eo pipefail
 
 usage() {
@@ -41,7 +41,7 @@ check_config() {
   # 已有 sdkconfig 优先于 defaults；发现旧板型时停止，保留用户配置供排查。
   local expected
   for expected in 'CONFIG_IDF_TARGET="esp32s3"' \
-      'CONFIG_BOARD_TYPE_QEBABE_XIAOCHE=y' 'CONFIG_OLED_SSD1306_128X64=y'; do
+      'CONFIG_BOARD_TYPE_INTELLIGENT_CAR=y' 'CONFIG_OLED_SSD1306_128X64=y'; do
     if ! grep -Fxq "$expected" "$firmware_dir/sdkconfig"; then
       echo "配置不符合当前构建预设：缺少 ${expected}。请参考 docs/build.md 备份并排查配置。" >&2
       exit 1
@@ -51,7 +51,7 @@ check_config() {
 if [[ -f "$firmware_dir/sdkconfig" ]]; then check_config; fi
 export IDF_TARGET=esp32s3
 idf_args=(-C "$firmware_dir" -B "$firmware_dir/build"
-  "-DSDKCONFIG_DEFAULTS=$firmware_dir/sdkconfig.defaults;$project_dir/tools/sdkconfig.defaults.qebabe")
+  "-DSDKCONFIG_DEFAULTS=$firmware_dir/sdkconfig.defaults;$project_dir/tools/sdkconfig.defaults.car")
 case "$action" in
   build|flash)
     idf.py "${idf_args[@]}" build

@@ -10,7 +10,7 @@
 
 commit 保存本地改动；push 将提交上传 GitHub；PR 请求将来源分支（compare）合入目标分支（base）。上传分支不会自动合并。
 
-## 当前第一步
+## 第一步：构建工具
 
 分支为 `chore/build-tooling`。范围是工具链安装、显式小车构建预设、编译与烧录入口、忽略规则、依赖锁文件和基础文档。完整固件编译与脚本检查通过后，提交并上传该分支：
 
@@ -36,6 +36,24 @@ git switch -c chore/car-project-layout
 ```
 
 切换前确认工作区干净；`--ff-only` 若失败，先查看分叉原因，不要强推或清除本地改动。
+
+## 第二步：单小车工程
+
+第一步合并后，从最新 `dev` 创建 `chore/car-project-layout`。本步骤裁剪无关板型、调整构建菜单与路径、统一工程名称并补齐 CI，范围见 [工程说明](repository.md)。先备份本机配置和旧构建目录，再完整编译，并确认原有源码引用没有丢失。
+
+检查完成后提交并上传，随后创建 **base: dev，compare: chore/car-project-layout** 的 PR：
+
+```bash
+git status --short
+git diff --stat
+git add -A -- .github README.md THIRD_PARTY_NOTICES.md docs firmware tools
+git diff --cached --check
+git diff --cached --summary
+git commit -m "chore: focus firmware project on ESP32-S3 car"
+git push -u origin chore/car-project-layout
+```
+
+删除文件较多是本步骤的预期结果，但仍需检查范围、目录重命名和许可证保留情况。PR 合并后按前述方式更新 `dev`，再创建 `feat/linx-integration`；此时不需要直接合入 `main`。
 
 ## 后续模块与发布节点
 
