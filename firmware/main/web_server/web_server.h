@@ -5,6 +5,7 @@
 #include <string>
 #include <functional>
 #include <vector>
+#include <mutex>
 #include "motor_control.h"
 
 class WebServer {
@@ -24,6 +25,8 @@ public:
     void SetEmotionCallback(std::function<void(const char* emotion)> callback);
     // 设置表情（封装私有回调）
     void SetEmotion(const char* emotion);
+    void SetTurretCallbacks(std::function<std::string()> status, std::function<bool(int)> prepare,
+                            std::function<bool()> disarm);
 
     // 电机动作配置回调
     using MotorActionConfig = car::MotorActionConfig;
@@ -36,10 +39,18 @@ public:
 
 private:
     httpd_handle_t server_handle_;
+    std::mutex lifecycle_mutex_;
+    int server_port_ = 0;
     std::function<bool(int direction, int speed)> motor_control_callback_;
     std::function<void(const char* emotion)> emotion_callback_;
     std::function<MotorActionConfig()> get_motor_config_callback_;
     std::function<void(const MotorActionConfig&)> set_motor_config_callback_;
+    std::function<std::string()> turret_status_callback_;
+    std::function<bool(int)> turret_prepare_callback_;
+    std::function<bool()> turret_disarm_callback_;
+    static esp_err_t turret_status_handler(httpd_req_t* req);
+    static esp_err_t turret_prepare_handler(httpd_req_t* req);
+    static esp_err_t turret_disarm_handler(httpd_req_t* req);
 
     // HTTP请求处理函数
     static esp_err_t index_get_handler(httpd_req_t *req);

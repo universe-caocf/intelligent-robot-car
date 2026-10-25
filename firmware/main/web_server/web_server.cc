@@ -15,7 +15,19 @@ static const char *TAG = "WebServer";
 namespace {
 // HTTP 请求可能分段到达；必须读完整并补零，不能把未终止的缓冲区交给 JSON/表单解析器。
 bool ReadBody(httpd_req_t* req, char* buffer, size_t capacity) {
-    // 保留原控制接口的跨域响应约定；鉴权与控制端独占不是本次改动范围。
+    // 防止其他网页用跨域表单驱动车轮；无Origin的本地CLI仍兼容，这不是身份鉴权。
+    size_t origin_size = httpd_req_get_hdr_value_len(req, "Origin");
+    if (origin_size != 0) {
+        char origin[160], host[128];
+        size_t host_size = httpd_req_get_hdr_value_len(req, "Host");
+        if (origin_size >= sizeof(origin) || host_size == 0 || host_size >= sizeof(host) ||
+            httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) != ESP_OK ||
+            httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
+            std::string(origin) != std::string("http://") + host) {
+            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Cross-origin control is not allowed");
+            return false;
+        }
+    }
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
@@ -100,11 +112,14 @@ WebServer::~WebServer() {
 }
 
 bool WebServer::Start(int port) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (port < 1 || port > 65535) return false;
+    if (server_handle_) return server_port_ == port;
     ESP_LOGI(TAG, "Starting web server on port %d", port);
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = port;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 13;
     // 增加超时设置以更好地处理频繁请求
     config.recv_wait_timeout = 5;  // 接收超时5秒
     config.send_wait_timeout = 5;  // 发送超时5秒
@@ -115,96 +130,40 @@ bool WebServer::Start(int port) {
         return false;
     }
 
-    // 注册URI处理器
-    httpd_uri_t index_uri = {
-        .uri       = "/",
-        .method    = HTTP_GET,
-        .handler   = index_get_handler,
-        .user_ctx  = this
+    const httpd_uri_t routes[] = {
+        {"/api/turret/status", HTTP_GET, turret_status_handler, this},
+        {"/api/turret/prepare", HTTP_POST, turret_prepare_handler, this},
+        {"/api/turret/disarm", HTTP_POST, turret_disarm_handler, this},
+        {"/", HTTP_GET, index_get_handler, this},
+        {"/control", HTTP_POST, control_post_handler, this},
+        {"/api/control", HTTP_POST, api_control_handler, this},
+        {"/api/motor/action", HTTP_POST, api_motor_action_handler, this},
+        {"/api/debug/motor_test", HTTP_POST, debug_motor_test_handler, this},
+        {"/api/motor/status", HTTP_GET, api_motor_status_handler, this},
+        {"/config", HTTP_GET, config_get_handler, this},
+        {"/config", HTTP_POST, config_post_handler, this},
+        {"/api/config", HTTP_GET, api_config_get_handler, this},
+        {"/api/config", HTTP_POST, api_config_post_handler, this},
     };
-    httpd_register_uri_handler(server_handle_, &index_uri);
-
-    httpd_uri_t control_uri = {
-        .uri       = "/control",
-        .method    = HTTP_POST,
-        .handler   = control_post_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &control_uri);
-
-    httpd_uri_t api_control_uri = {
-        .uri       = "/api/control",
-        .method    = HTTP_POST,
-        .handler   = api_control_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &api_control_uri);
-
-    httpd_uri_t api_motor_action_uri = {
-        .uri       = "/api/motor/action",
-        .method    = HTTP_POST,
-        .handler   = api_motor_action_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &api_motor_action_uri);
-
-    httpd_uri_t debug_uri = {
-        .uri       = "/api/debug/motor_test",
-        .method    = HTTP_POST,
-        .handler   = debug_motor_test_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &debug_uri);
-
-    httpd_uri_t motor_status_uri = {
-        .uri = "/api/motor/status",
-        .method = HTTP_GET,
-        .handler = api_motor_status_handler,
-        .user_ctx = this
-    };
-    httpd_register_uri_handler(server_handle_, &motor_status_uri);
-
-    // 注册配置页面处理器
-    httpd_uri_t config_uri = {
-        .uri       = "/config",
-        .method    = HTTP_GET,
-        .handler   = config_get_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &config_uri);
-
-    httpd_uri_t config_post_uri = {
-        .uri       = "/config",
-        .method    = HTTP_POST,
-        .handler   = config_post_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &config_post_uri);
-
-    httpd_uri_t api_config_get_uri = {
-        .uri       = "/api/config",
-        .method    = HTTP_GET,
-        .handler   = api_config_get_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &api_config_get_uri);
-
-    httpd_uri_t api_config_post_uri = {
-        .uri       = "/api/config",
-        .method    = HTTP_POST,
-        .handler   = api_config_post_handler,
-        .user_ctx  = this
-    };
-    httpd_register_uri_handler(server_handle_, &api_config_post_uri);
+    for (const auto& route : routes) {
+        if (httpd_register_uri_handler(server_handle_, &route) != ESP_OK) {
+            ESP_LOGE(TAG, "Cannot register %s; rolling back HTTP server", route.uri);
+            httpd_stop(server_handle_); server_handle_ = nullptr; server_port_ = 0;
+            return false;
+        }
+    }
+    server_port_ = port;
 
     ESP_LOGI(TAG, "Web server started successfully");
     return true;
 }
 
 void WebServer::Stop() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (server_handle_) {
         httpd_stop(server_handle_);
         server_handle_ = nullptr;
+        server_port_ = 0;
         ESP_LOGI(TAG, "Web server stopped");
     }
 }
@@ -231,6 +190,54 @@ void WebServer::SetEmotion(const char* emotion) {
     if (emotion_callback_) {
         emotion_callback_(emotion);
     }
+}
+
+void WebServer::SetTurretCallbacks(std::function<std::string()> status, std::function<bool(int)> prepare,
+                                  std::function<bool()> disarm) {
+    turret_status_callback_ = std::move(status);
+    turret_prepare_callback_ = std::move(prepare);
+    turret_disarm_callback_ = std::move(disarm);
+}
+
+esp_err_t WebServer::turret_status_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
+    if (!server->turret_status_callback_) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Turret callback unavailable");
+    auto status = server->turret_status_callback_();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, status.c_str(), status.size());
+}
+
+esp_err_t WebServer::turret_prepare_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
+    char content[100];
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    cJSON* root = ParseObject(content);
+    int count = 1;
+    bool valid = root && ReadInteger(root, "count", count, false) && count >= 1 && count <= 3;
+    cJSON_Delete(root);
+    if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "count must be an integer 1..3");
+    if (!server->turret_prepare_callback_ || !server->turret_prepare_callback_(count)) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_send(req, "Turret rejected; inspect /api/turret/status", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"accepted\":true,\"state\":\"awaiting_confirmation\",\"fired\":false}", HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t WebServer::turret_disarm_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
+    char content[32];
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    cJSON* root = ParseObject(content);
+    bool valid = root != nullptr; cJSON_Delete(root);
+    if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON object required");
+    if (!server->turret_disarm_callback_ || !server->turret_disarm_callback_()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_send(req, "Disarm requested but turret fault latched; inspect status", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_type(req, "application/json");
+    // 禁用状态也接受幂等取消，不把disabled错误报告为disarmed。
+    return httpd_resp_send(req, "{\"accepted\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t WebServer::index_get_handler(httpd_req_t *req) {
@@ -595,7 +602,7 @@ const char* WebServer::get_html_page() {
 </head>
 <body>
     <div class="container">
-        <h1>🚗 小智小车遥控器</h1>
+        <h1>🚗 灵矽互动小车</h1>
         <div class="subtitle">触摸或拖拽摇杆控制小车移动</div>
 
         <div class="joystick-container" id="joystick-container">

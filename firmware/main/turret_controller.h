@@ -9,6 +9,8 @@ struct TurretHardwareConfig {
     bool enabled = false;
     int flywheel_gpio = -1, push_gpio = -1, confirm_gpio = -1, tilt_gpio = -1;
     int rest_us = 1000, push_us = 1500;
+    int tilt_min_us = 500, tilt_max_us = 2500;
+    int tilt_min_angle = 60, tilt_max_angle = 120;
     TurretTiming timing;
     static TurretHardwareConfig FromBuildConfig();
     bool IsValid() const;
@@ -27,6 +29,7 @@ public:
     bool Disarm(const char* reason);
     void SetNetworkAvailable(bool available);
     bool SetTilt(int angle);
+    bool CanSleep();
     std::string GetStatus();
 private:
     void Poll();

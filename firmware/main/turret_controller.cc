@@ -24,6 +24,10 @@ TurretHardwareConfig TurretHardwareConfig::FromBuildConfig() {
     config.tilt_gpio = CONFIG_CAR_TURRET_TILT_GPIO;
     config.rest_us = CONFIG_CAR_TURRET_REST_US;
     config.push_us = CONFIG_CAR_TURRET_PUSH_US;
+    config.tilt_min_us = CONFIG_CAR_TURRET_TILT_MIN_US;
+    config.tilt_max_us = CONFIG_CAR_TURRET_TILT_MAX_US;
+    config.tilt_min_angle = CONFIG_CAR_TURRET_TILT_MIN_ANGLE;
+    config.tilt_max_angle = CONFIG_CAR_TURRET_TILT_MAX_ANGLE;
     config.timing = {CONFIG_CAR_TURRET_SPIN_MS, CONFIG_CAR_TURRET_PUSH_MS, CONFIG_CAR_TURRET_RECOVER_MS};
 #endif
     return config;
@@ -35,7 +39,9 @@ bool TurretHardwareConfig::IsValid() const {
     auto available = [](int pin) { return pin == 8 || pin == 9 || pin == 10 || pin == 11 || pin == 17 || pin == 38; };
     if (!available(flywheel_gpio) || !available(push_gpio) || !available(confirm_gpio) ||
         (tilt_gpio != -1 && !available(tilt_gpio)) || !timing.IsValid() ||
-        rest_us < 500 || rest_us > 2500 || push_us < 500 || push_us > 2500 || rest_us == push_us) return false;
+        rest_us < 500 || rest_us > 2500 || push_us < 500 || push_us > 2500 || rest_us == push_us ||
+        tilt_min_us < 500 || tilt_max_us > 2500 || tilt_min_us >= tilt_max_us ||
+        tilt_min_angle < 0 || tilt_max_angle > 180 || tilt_min_angle >= tilt_max_angle) return false;
     const int pins[] = {flywheel_gpio, push_gpio, confirm_gpio, tilt_gpio};
     for (int i = 0; i < 4; ++i) for (int j = i + 1; j < 4; ++j)
         if (pins[i] >= 0 && pins[i] == pins[j]) return false;
@@ -187,9 +193,9 @@ void TurretController::SetNetworkAvailable(bool available) {
 bool TurretController::SetTilt(int angle) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_ || !network_available_ || config_.tilt_gpio < 0 ||
-        control_.state() != TurretState::Disarmed || angle < 60 || angle > 120) return false;
+        control_.state() != TurretState::Disarmed || angle < config_.tilt_min_angle || angle > config_.tilt_max_angle) return false;
     // 仅约定舵机命令角度，不代表测得的炮口俯仰；到货后核验行程。
-    tilt_pulse_us_ = 500 + angle * 2000 / 180;
+    tilt_pulse_us_ = config_.tilt_min_us + angle * (config_.tilt_max_us - config_.tilt_min_us) / 180;
     tilt_deadline_ms_ = NowMs() + 2000;
     reason_ = "tilt_command_accepted";
     return ApplyOutputLocked();
@@ -223,6 +229,11 @@ void TurretController::Poll() {
     ApplyOutputLocked();
 }
 
+bool TurretController::CanSleep() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (control_.state() == TurretState::Disabled || control_.state() == TurretState::Disarmed) && tilt_pulse_us_ == 0;
+}
+
 std::string TurretController::GetStatus() {
     std::lock_guard<std::mutex> lock(mutex_);
     // 查询只返回快照，不推进推弹动作；推进只发生在执行器任务。
@@ -238,6 +249,8 @@ std::string TurretController::GetStatus() {
         std::max<int64_t>(0, control_.deadline_ms() - NowMs()) : 0);
     cJSON_AddBoolToObject(status, "flywheel_commanded", control_.flywheel());
     cJSON_AddBoolToObject(status, "tilt_available", initialized_ && config_.tilt_gpio >= 0);
+    cJSON_AddNumberToObject(status, "tilt_min_angle", config_.tilt_min_angle);
+    cJSON_AddNumberToObject(status, "tilt_max_angle", config_.tilt_max_angle);
     cJSON_AddStringToObject(status, "reason", reason_.c_str());
     cJSON_AddStringToObject(status, "feedback", "commanded_output_only_no_dart_or_hit_sensor");
     char* json = cJSON_PrintUnformatted(status);
