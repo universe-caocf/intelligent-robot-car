@@ -4,6 +4,7 @@
 #include "display/oled_display.h"
 #include "system_reset.h"
 #include "application.h"
+#include "turret_controller.h"
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
@@ -43,6 +44,32 @@ private:
     Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
+    std::unique_ptr<Button> turret_confirm_button_;
+
+    void InitializeTurret() {
+        auto& turret = car::TurretController::GetInstance();
+        if (!turret.Initialize()) return;
+#if CONFIG_CAR_TURRET_ENABLED
+        // 使用独立按钮，不抢占 BOOT、触摸对话键或音量键。需持续按住。
+        turret_confirm_button_ = std::make_unique<Button>(
+            static_cast<gpio_num_t>(CONFIG_CAR_TURRET_CONFIRM_GPIO), false, 1000);
+        turret_confirm_button_->OnPressDown([this]() {
+            bool eligible = car::TurretController::GetInstance().BeginPhysicalConfirmation();
+            GetDisplay()->ShowNotification(eligible ? "按住确认，松手取消" : "暂无待确认的发射申请");
+        });
+        turret_confirm_button_->OnLongPress([this]() {
+            bool accepted = car::TurretController::GetInstance().ConfirmPhysical();
+            GetDisplay()->ShowNotification(accepted ? "推弹序列已下发，松手取消" : "未执行：申请失效或状态不允许");
+        });
+        turret_confirm_button_->OnPressUp([this]() {
+            // 松手通过既有全局停车入口同步取消底盘与炮塔。
+            if (!Application::GetInstance().HandleMotorActionWithDuration(0, 0, 0)) {
+                ESP_LOGE(TAG, "Physical release stop failed; inspect chassis and turret");
+                GetDisplay()->ShowNotification("停车故障，请断开动力");
+            }
+        });
+#endif
+    }
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -221,15 +248,49 @@ private:
                     return "Accepted " + pattern + "; physical completion unverified";
                 });
         }
-        mcp_server.AddTool("self.motor.stop", "Stop chassis output and cancel all remaining movement steps",
+        mcp_server.AddTool("self.motor.stop", "Stop chassis and turret output, cancel movement steps and pending firing request",
             PropertyList(), [](const PropertyList&) -> ReturnValue {
                 if (!Application::GetInstance().HandleMotorActionWithDuration(0, 0, 0))
-                    throw std::runtime_error("Stop requested but motor hardware fault is latched; check status");
-                return std::string("Chassis output stopped and pending steps canceled; no physical feedback sensor");
+                    throw std::runtime_error("Stop requested but chassis or turret hardware fault is latched; inspect both statuses");
+                return std::string("Chassis and turret outputs stopped; pending actions canceled; no physical feedback sensor");
             });
         mcp_server.AddTool("self.motor.get_status", "Get commanded chassis state; this is not measured physical motion",
             PropertyList(), [](const PropertyList&) -> ReturnValue {
                 return Application::GetInstance().GetMotorStatus();
+            });
+
+        mcp_server.AddTool("self.turret.get_status",
+            "Read turret commanded state; disabled by default. Feed cycles are not confirmed shots or hits.",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                return car::TurretController::GetInstance().GetStatus();
+            });
+        mcp_server.AddTool("self.turret.prepare",
+            "Request 1..3 soft-dart feed cycles only on explicit user request. Does NOT fire. "
+            "Within 10 seconds user must press and hold the separate physical button for 1 second; release cancels. "
+            "No remote or voice confirmation exists. Never retry automatically.",
+            PropertyList({Property("count", kPropertyTypeInteger, 1, 1, 3)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int count = properties["count"].value<int>();
+                if (!car::TurretController::GetInstance().Request(count))
+                    throw std::runtime_error("Request rejected: inspect self.turret.get_status; do not retry automatically");
+                GetDisplay()->ShowNotification("10秒内按住独立确认键，松手取消", 10000);
+                return std::string("Pending physical confirmation for ") + std::to_string(count) +
+                    " feed cycles; NOT fired. Hold dedicated button within 10 seconds; release cancels.";
+            });
+        mcp_server.AddTool("self.turret.disarm", "Immediately cancel pending request and feed sequence, disable flywheel and servo pulses",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                if (!car::TurretController::GetInstance().Disarm("MCP disarm"))
+                    throw std::runtime_error("Disarm requested but turret fault latched; disconnect power and inspect");
+                return std::string("Turret output disabled; pending request canceled; flywheel coast-down unmeasured");
+            });
+        mcp_server.AddTool("self.turret.set_tilt",
+            "Optional servo command angle 60..120, only when disarmed. Requires calibrated wiring. "
+            "Not measured barrel angle; no targeting or hit feedback.",
+            PropertyList({Property("angle", kPropertyTypeInteger, 60, 120)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                if (!car::TurretController::GetInstance().SetTilt(properties["angle"].value<int>()))
+                    throw std::runtime_error("Tilt rejected: check enabled hardware, optional servo and disarmed state");
+                return std::string("Servo command accepted; physical angle unverified");
             });
 
         // 保留已有工具名称兼容客户端，但情绪工具只更新屏幕，不驱动车轮。
@@ -269,6 +330,7 @@ public:
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
+        InitializeTurret();
         InitializeTools();
     }
     virtual AudioCodec* GetAudioCodec() override {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "application.h"
+#include "turret_controller.h"
 #include "settings.h"
 #include "boards/intelligent-car/config.h"
 #include <algorithm>
@@ -98,6 +99,7 @@ bool Application::HandleWebMotorControl(int direction, int speed) {
 }
 
 void Application::SetMotorNetworkAvailable(bool available) {
+    car::TurretController::GetInstance().SetNetworkAvailable(available);
     std::lock_guard<std::mutex> lock(motor_mutex_);
     motor_network_available_ = available;
     if (!available) {
@@ -108,11 +110,13 @@ void Application::SetMotorNetworkAvailable(bool available) {
 }
 
 bool Application::StopMotorControl(const char* reason) {
+    // 保留旧停车入口兼容性，同时取消炮塔；两模块不嵌套持锁。
+    bool turret_stopped = car::TurretController::GetInstance().Disarm(reason);
     std::lock_guard<std::mutex> lock(motor_mutex_);
     motor_control_.Stop();
     StopMotorOutputLocked();
     ESP_LOGI(TAG, "Motor stop requested, sequence cleared: %s", reason);
-    return !motor_hardware_fault_;
+    return !motor_hardware_fault_ && turret_stopped;
 }
 
 void Application::StopMotorOutputLocked() {

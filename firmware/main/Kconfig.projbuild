@@ -1,5 +1,59 @@
 menu "Intelligent Robot Car"
 
+menu "Soft dart turret (verify wiring before enabling)"
+config CAR_TURRET_ENABLED
+    bool "Enable soft dart turret hardware"
+    default n
+    help
+        Disabled firmware never initializes turret outputs. Confirm wiring, power
+        and mechanical travel first. Voice requests require a separate physical button.
+
+config CAR_TURRET_FLYWHEEL_GPIO
+    int "Flywheel MOSFET GPIO (-1 means unconfigured)"
+    default -1
+    range -1 48
+
+config CAR_TURRET_PUSH_GPIO
+    int "Pusher servo GPIO (-1 means unconfigured)"
+    default -1
+    range -1 48
+
+config CAR_TURRET_CONFIRM_GPIO
+    int "Dedicated active-low confirmation button GPIO"
+    default -1
+    range -1 48
+
+config CAR_TURRET_TILT_GPIO
+    int "Optional tilt servo GPIO (-1 disables tilt)"
+    default -1
+    range -1 48
+
+config CAR_TURRET_REST_US
+    int "Pusher rest pulse in microseconds (unverified initial value)"
+    default 1000
+    range 500 2500
+
+config CAR_TURRET_PUSH_US
+    int "Pusher push pulse in microseconds (unverified initial value)"
+    default 1500
+    range 500 2500
+
+config CAR_TURRET_SPIN_MS
+    int "Flywheel startup time (requires bench calibration)"
+    default 700
+    range 100 3000
+
+config CAR_TURRET_PUSH_MS
+    int "Pusher hold time"
+    default 250
+    range 100 1000
+
+config CAR_TURRET_RECOVER_MS
+    int "Pusher return and inter-cycle time"
+    default 450
+    range 100 1000
+endmenu
+
 config OTA_URL
     string "Default OTA URL"
     default "https://xrobo.qiniuapi.com/v1/ota/"

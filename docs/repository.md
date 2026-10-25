@@ -6,6 +6,8 @@
 firmware/
   main/boards/intelligent-car/  小车接线、板级初始化、MCP 工具
   main/motor_control.h/.cc     底盘状态机、执行器与设备适配
+  main/turret_control.h        可独立测试的炮塔状态机
+  main/turret_controller.h/.cc 炮塔硬件适配、执行器和故障处理
   main/boards/common/          公共板级、配网、驱动与电源支持
   main/audio/                  录音、播放、音频处理和唤醒
   main/protocols/              MQTT / WebSocket 通信
