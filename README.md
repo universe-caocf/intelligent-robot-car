@@ -18,6 +18,7 @@ cd intelligent-robot-car
 已有 ESP-IDF **v5.5.1** 时可以跳过安装，用 `IDF_PATH` 指定目录。无需硬件即可编译；首次构建需要网络和组件下载空间。当前板型从上游 Qebabe 小车派生，使用 ESP32-S3 与 SSD1306 128×64 屏幕，实际硬件是否匹配仍需到货核对。
 
 - [构建、烧录和排错](docs/build.md)
+- [硬件前准备状态与剩余事项](docs/preparation-status.md)
 - [产品设计与评分对应](docs/product.md)
 - [架构设计、模块规格与单人分工](docs/architecture.md)
 - [物料、接线与组装](docs/hardware.md)
@@ -32,6 +33,15 @@ cd intelligent-robot-car
 - [工程目录、裁剪范围与兼容说明](docs/repository.md)
 - [codebase 来源和基线说明](CODEBASE.md)
 - [第三方许可声明](THIRD_PARTY_NOTICES.md)
+
+## 不接硬件的完整检查
+
+```bash
+./tools/verify.sh --sanitize --build
+python3 tools/preflight.py --require-build --json
+```
+
+工具不会刷机或注册设备。炮塔参数可用JSON预览、备份并应用，见 [配置说明](docs/build.md#硬件参数配置与完整检查)。主机测试和编译通过后，仍需实物核对、云端联调及真实录像。
 
 ## 目录与许可
 

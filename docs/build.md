@@ -66,6 +66,29 @@ if [ -d firmware/build ]; then mv firmware/build "$backup_dir/"; fi
 
 网络失败先检查完整错误日志和组件站点连接，不要首先删除 `dependencies.lock`。锁文件应随显式依赖变更在独立 PR 中更新。上游固件还有编译警告，构建通过不能证明运行逻辑正确。
 
+## 硬件参数配置与完整检查
+
+优先通过JSON配置工具调整炮塔引脚、推弹脉宽、时序和俯仰范围，无需修改C++。先完成一次构建生成本机sdkconfig，再复制示例到个人文件并按实物资料修改：
+
+```bash
+cp tools/hardware-profile.example.json /private/tmp/car-hardware.json
+python3 tools/configure-hardware.py /private/tmp/car-hardware.json
+python3 tools/configure-hardware.py /private/tmp/car-hardware.json --apply
+./tools/build.sh
+```
+
+第一条仅复制默认禁用/-1的模板，不要把测试引脚当实物接线。预览不写文件；显式--apply先把原sdkconfig备份至.local-backups/hardware-config/，再原子更新，只改已知硬件字段。备份可能含其他私密配置，不提交或分享。省略字段保留现有有效值；完整示例会覆盖其中列出的字段。无变化不备份、不写入。恢复时先保留当前配置，再用已打印备份路径恢复sdkconfig并重新构建。
+
+启用时必填GPIO需在候选白名单内且互不重复；范围、类型和交叉冲突都会拒绝。俯仰MIN/MAX_US是命令0/180度的映射端点，MIN/MAX_ANGLE是允许的命令范围；两者不同，均需空载标定。脚本只能验证配置合法，不能验证器件匹配。底盘方向可断电后调整电机接线，底盘动作参数可在本地/config页面调整；更换不兼容板卡、驱动或机构仍需代码适配。
+
+```bash
+./tools/verify.sh --sanitize
+./tools/verify.sh --sanitize --build
+python3 tools/preflight.py --require-build --json
+```
+
+verify先做只读预检查，再执行脚本语法、Python配置工具测试、底盘/HTTP/浏览器与炮塔测试；--build额外编译固件，不烧录、不注册设备。需Python3、Bash、C/C++编译器、Node和已安装ESP-IDF v5.5.1。preflight检查文档链接、固定v0、生成文件隔离、少量常见凭据模式和硬件配置；--require-build核对产物存在及构建配置，不保证源码与二进制时间一致，不能替代build。秘密模式扫描也不替代人工脱敏。
+
 ## 第一步构建工具验证记录（2026-10-25，历史记录）
 
 - macOS、ESP-IDF v5.5.1，通过 `./tools/build.sh` 从新生成的配置和构建目录完成编译与链接。

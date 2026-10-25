@@ -47,6 +47,10 @@ check_config() {
       exit 1
     fi
   done
+  # 无效硬件配置仍允许进入菜单修正；构建和烧录前必须校验。
+  if [[ "$action" == build || "$action" == flash ]]; then
+    python3 "$project_dir/tools/configure-hardware.py" --check-sdkconfig "$firmware_dir/sdkconfig"
+  fi
 }
 if [[ -f "$firmware_dir/sdkconfig" ]]; then check_config; fi
 export IDF_TARGET=esp32s3
@@ -67,5 +71,8 @@ case "$action" in
     fi
     idf.py "${idf_args[@]}" -p "$CAR_PORT" monitor
     ;;
-  menuconfig) idf.py "${idf_args[@]}" menuconfig ;;
+  menuconfig)
+    idf.py "${idf_args[@]}" menuconfig
+    python3 "$project_dir/tools/configure-hardware.py" --check-sdkconfig "$firmware_dir/sdkconfig"
+    ;;
 esac
