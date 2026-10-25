@@ -18,6 +18,12 @@ cd intelligent-robot-car
 已有 ESP-IDF **v5.5.1** 时可以跳过安装，用 `IDF_PATH` 指定目录。无需硬件即可编译；首次构建需要网络和组件下载空间。当前板型从上游 Qebabe 小车派生，使用 ESP32-S3 与 SSD1306 128×64 屏幕，实际硬件是否匹配仍需到货核对。
 
 - [构建、烧录和排错](docs/build.md)
+- [产品设计与评分对应](docs/product.md)
+- [架构设计、模块规格与单人分工](docs/architecture.md)
+- [物料、接线与组装](docs/hardware.md)
+- [分层验收与故障演练](docs/acceptance.md)
+- [演示脚本](docs/demo.md)与[实际视频入口](demo/README.md)
+- [比赛交付与发布核对](docs/submission.md)
 - [灵矽接入、配网与首轮验证](docs/linx-setup.md)
 - [分阶段智能体提示词](docs/agent-prompt.md)
 - [底盘规则、状态接口与主机测试](docs/chassis-control.md)

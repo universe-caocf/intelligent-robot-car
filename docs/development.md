@@ -69,6 +69,8 @@ git push -u origin chore/car-project-layout
 
 ## 后续模块与发布节点
 
+第六步 docs/product-and-architecture 已补齐产品、模块规格/单人分工、接线、分层验收、演示与比赛交付文档。代码与工具的补漏修正可在同一分支形成后续独立commit，逐次保留验证结果，最终通过一个PR合入dev。实机视频和真实验收记录不能提前伪造；硬件前状态以 [验收](acceptance.md) 和最终准备报告为准。
+
 第三步 `feat/linx-integration` 单独提交灵矽默认接入地址、配置来源/设备身份日志和配网绑定说明，PR 仍以 `dev` 为目标。更新 defaults 后用新的有效配置完成本地构建；公开入口可达只算预检查，不代表设备绑定、语音或 MCP 已验收。合并后再从最新 `dev` 创建 `fix/chassis-control`。
 
 | 顺序 | 分支 | 工作范围 |

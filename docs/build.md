@@ -6,7 +6,7 @@ ESP-IDF 是乐鑫 ESP32 的开发框架和编译工具链，本项目固定使�
 
 `sdkconfig.defaults*` 是可共享的默认配置，`sdkconfig` 是 ESP-IDF 生成的本机有效配置，已有有效配置优先于默认值。因此不能只添加 defaults 就认为旧构建目录会自动切换板型。
 
-本项目入口在上游 defaults 基础上叠加 `tools/sdkconfig.defaults.car`，明确选择 **ESP32-S3 / Intelligent Robot Car / SSD1306 128×64**，并预置灵矽 OTA/接入地址。ESP-IDF 还会加载基础 defaults 对应的 `.esp32s3` 文件。板级源码位于 `firmware/main/boards/intelligent-car/`，沿用原 Qebabe 小车引脚；实际硬件是否匹配仍需核对。动作逻辑尚未修正，灵矽绑定与协议仍需按 [接入说明](linx-setup.md) 实机验证。
+本项目入口在上游 defaults 基础上叠加 `tools/sdkconfig.defaults.car`，明确选择 **ESP32-S3 / Intelligent Robot Car / SSD1306 128×64**，并预置灵矽 OTA/接入地址。ESP-IDF 还会加载基础 defaults 对应的 `.esp32s3` 文件。板级源码位于 `firmware/main/boards/intelligent-car/`，沿用原 Qebabe 小车引脚；实际硬件是否匹配仍需核对。底盘与炮塔控制已实现并完成主机验证；灵矽绑定与协议仍需按 [接入说明](linx-setup.md) 实机验证。
 
 ## 首次安装
 
