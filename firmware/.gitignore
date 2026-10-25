@@ -6,7 +6,8 @@ build/
 .devcontainer/
 sdkconfig.old
 sdkconfig
-dependencies.lock
+# 固定应用依赖版本，随源码提交。
+!dependencies.lock
 .env
 releases/
 main/assets/lang_config.h
