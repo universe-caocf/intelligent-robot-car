@@ -3,16 +3,93 @@
 #include <cstring>
 #include <cJSON.h>
 #include <esp_system.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <stdlib.h>
-
-// Forward declarations for motor control functions
-extern "C" void HandleMotorActionForApplication(int direction, int speed, int duration_ms, int priority);
-extern "C" void HandleMotorActionForEmotion(const char* emotion);
-extern "C" void HandleMotorActionForDance(uint8_t speed_percent);
+#include <cmath>
+#include <cerrno>
+#include <climits>
+#include <stdexcept>
+#include "application.h"
 
 static const char *TAG = "WebServer";
+
+namespace {
+// HTTP 请求可能分段到达；必须读完整并补零，不能把未终止的缓冲区交给 JSON/表单解析器。
+bool ReadBody(httpd_req_t* req, char* buffer, size_t capacity) {
+    // 保留原控制接口的跨域响应约定；鉴权与控制端独占不是本次改动范围。
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    if (req->content_len == 0 || req->content_len >= capacity) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty or oversized body");
+        return false;
+    }
+    size_t used = 0;
+    while (used < req->content_len) {
+        int received = httpd_req_recv(req, buffer + used, req->content_len - used);
+        if (received <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Incomplete body");
+            return false;
+        }
+        used += received;
+    }
+    buffer[used] = '\0';
+    if (memchr(buffer, '\0', used)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return false;
+    }
+    return true;
+}
+
+cJSON* ParseObject(const char* body) {
+    cJSON* root = cJSON_ParseWithOpts(body, nullptr, true);
+    if (!cJSON_IsObject(root)) { cJSON_Delete(root); return nullptr; }
+    return root;
+}
+
+bool ReadInteger(const cJSON* root, const char* key, int& value, bool required = true) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!item) return !required;
+    if (!cJSON_IsNumber(item) || !std::isfinite(item->valuedouble) ||
+            item->valuedouble < INT_MIN || item->valuedouble > INT_MAX ||
+            std::trunc(item->valuedouble) != item->valuedouble) return false;
+    value = item->valueint;
+    return true;
+}
+
+struct ConfigField { const char* key; int car::MotorActionConfig::*member; };
+constexpr ConfigField kConfigFields[] = {
+    {"forward_ms", &car::MotorActionConfig::forward_duration_ms},
+    {"backward_ms", &car::MotorActionConfig::backward_duration_ms},
+    {"left_turn_ms", &car::MotorActionConfig::left_turn_duration_ms},
+    {"right_turn_ms", &car::MotorActionConfig::right_turn_duration_ms},
+    {"spin_ms", &car::MotorActionConfig::spin_duration_ms},
+    {"wiggle_ms", &car::MotorActionConfig::wiggle_duration_ms},
+    {"dance_ms", &car::MotorActionConfig::dance_duration_ms},
+    {"quick_fwd_ms", &car::MotorActionConfig::quick_forward_duration_ms},
+    {"quick_bwd_ms", &car::MotorActionConfig::quick_backward_duration_ms},
+    {"def_speed_pct", &car::MotorActionConfig::default_speed_percent}
+};
+
+bool ParseIntegerText(const std::string& text, int& value) {
+    if (text.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    long number = strtol(text.c_str(), &end, 10);
+    if (errno || end == text.c_str() || *end != '\0' || number < INT_MIN || number > INT_MAX) return false;
+    value = static_cast<int>(number);
+    return true;
+}
+
+esp_err_t SendMotorResult(httpd_req_t* req, bool accepted) {
+    if (!accepted) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"status\":\"rejected\",\"error\":\"Check network and /api/motor/status\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"status\":\"ok\",\"accepted\":true,\"physical_completion_verified\":false}", HTTPD_RESP_USE_STRLEN);
+}
+}  // namespace
 
 WebServer::WebServer()
     : server_handle_(nullptr) {
@@ -79,6 +156,14 @@ bool WebServer::Start(int port) {
     };
     httpd_register_uri_handler(server_handle_, &debug_uri);
 
+    httpd_uri_t motor_status_uri = {
+        .uri = "/api/motor/status",
+        .method = HTTP_GET,
+        .handler = api_motor_status_handler,
+        .user_ctx = this
+    };
+    httpd_register_uri_handler(server_handle_, &motor_status_uri);
+
     // 注册配置页面处理器
     httpd_uri_t config_uri = {
         .uri       = "/config",
@@ -124,14 +209,12 @@ void WebServer::Stop() {
     }
 }
 
-void WebServer::SetMotorControlCallback(std::function<void(int direction, int speed)> callback) {
+void WebServer::SetMotorControlCallback(std::function<bool(int direction, int speed)> callback) {
     motor_control_callback_ = callback;
 }
 
-void WebServer::InvokeMotorControl(int direction, int speed) {
-    if (motor_control_callback_) {
-        motor_control_callback_(direction, speed);
-    }
+bool WebServer::InvokeMotorControl(int direction, int speed) {
+    return motor_control_callback_ && motor_control_callback_(direction, speed);
 }
 
 void WebServer::SetMotorActionConfigCallback(std::function<MotorActionConfig()> get_callback,
@@ -164,287 +247,120 @@ esp_err_t WebServer::index_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-esp_err_t WebServer::control_post_handler(httpd_req_t *req) {
-    WebServer* server = (WebServer*)req->user_ctx;
-
-    // 设置CORS头
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-
+esp_err_t WebServer::control_post_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
     char content[100];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
-        return ESP_FAIL;
-    }
-
-    int direction, speed;
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    int direction = -1, speed = -1;
     server->parse_simple_control_command(content, direction, speed);
-
-    // 调用电机控制回调（通过公共封装）
-    server->InvokeMotorControl(direction, speed);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
-
-    return ESP_OK;
+    if (!car::MotorControl::ValidCommand(direction, speed)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid direction or speed");
+        return ESP_FAIL;
+    }
+    return SendMotorResult(req, server->InvokeMotorControl(direction, speed));
 }
 
-esp_err_t WebServer::api_control_handler(httpd_req_t *req) {
-    WebServer* server = (WebServer*)req->user_ctx;
-
-    // 设置CORS头
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-
+esp_err_t WebServer::api_control_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
     char content[200];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
-        return ESP_FAIL;
-    }
-
-    // 解析JSON数据
-    cJSON *root = cJSON_Parse(content);
-    if (root == NULL) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
-    }
-
-    int direction = cJSON_GetObjectItem(root, "direction")->valueint;
-    int speed = cJSON_GetObjectItem(root, "speed")->valueint;
-
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    cJSON* root = ParseObject(content);
+    int direction = -1, speed = -1;
+    bool valid = root && ReadInteger(root, "direction", direction) && ReadInteger(root, "speed", speed) &&
+        car::MotorControl::ValidCommand(direction, speed);
     cJSON_Delete(root);
-
-    // 调用电机控制回调（通过公共封装）
-    server->InvokeMotorControl(direction, speed);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
-
-    return ESP_OK;
-}
-
-// Simple struct passed to the stop task
-struct debug_stop_param_t {
-    WebServer* server;
-    int duration_ms;
-};
-
-static void debug_stop_task(void* arg) {
-    debug_stop_param_t* p = static_cast<debug_stop_param_t*>(arg);
-    if (!p) vTaskDelete(NULL);
-    vTaskDelay(pdMS_TO_TICKS(p->duration_ms));
-    if (p->server) {
-        p->server->InvokeMotorControl(0, 0); // stop via public wrapper
-    }
-    free(p);
-    vTaskDelete(NULL);
-}
-
-esp_err_t WebServer::debug_motor_test_handler(httpd_req_t *req) {
-    WebServer* server = (WebServer*)req->user_ctx;
-
-    // 设置CORS头
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-
-    char content[256];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
+    if (!valid) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Integer direction 0..4 and speed 0..100 required");
         return ESP_FAIL;
     }
+    return SendMotorResult(req, server->InvokeMotorControl(direction, speed));
+}
 
-    cJSON *root = cJSON_Parse(content);
-    int direction = 4;
-    int speed = 80;
-    int duration = 1000;
-    if (root) {
-        cJSON* jdir = cJSON_GetObjectItem(root, "direction");
-        cJSON* jspd = cJSON_GetObjectItem(root, "speed");
-        cJSON* jdur = cJSON_GetObjectItem(root, "duration");
-        if (cJSON_IsNumber(jdir)) direction = jdir->valueint;
-        if (cJSON_IsNumber(jspd)) speed = jspd->valueint;
-        if (cJSON_IsNumber(jdur)) duration = jdur->valueint;
-        cJSON_Delete(root);
+esp_err_t WebServer::api_motor_status_handler(httpd_req_t* req) {
+    auto status = Application::GetInstance().GetMotorStatus();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, status.c_str(), status.size());
+}
+
+esp_err_t WebServer::debug_motor_test_handler(httpd_req_t* req) {
+    char content[256];
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    cJSON* root = ParseObject(content);
+    auto& app = Application::GetInstance();
+    auto config = app.GetMotorActionConfig();
+    int direction = 4, speed = config.default_speed_percent, duration = config.forward_duration_ms;
+    bool valid = root && ReadInteger(root, "direction", direction, false) &&
+        ReadInteger(root, "speed", speed, false) && ReadInteger(root, "duration", duration, false) &&
+        car::MotorControl::ValidCommand(direction, speed) && duration >= car::kMinDurationMs && duration <= car::kMaxDurationMs;
+    cJSON_Delete(root);
+    if (!valid) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid motor test parameters");
+        return ESP_FAIL;
     }
+    // 调试接口也走统一定时执行器，不再创建可能打断后续指令的停止任务。
+    return SendMotorResult(req, app.HandleMotorActionWithDuration(direction, speed, duration));
+}
 
-    if (server) {
-        server->InvokeMotorControl(direction, speed);
-        // spawn a short-lived task to stop after duration ms
-        debug_stop_param_t* p = (debug_stop_param_t*)malloc(sizeof(debug_stop_param_t));
-        if (p) {
-            p->server = server;
-            p->duration_ms = duration;
-            BaseType_t rc = xTaskCreate(debug_stop_task, "dbg_stop", 2048, p, tskIDLE_PRIORITY + 1, NULL);
-            if (rc != pdPASS) {
-                free(p);
-            }
+esp_err_t WebServer::api_motor_action_handler(httpd_req_t* req) {
+    auto* server = static_cast<WebServer*>(req->user_ctx);
+    char content[256];
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
+    cJSON* root = ParseObject(content);
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(root, "action");
+    if (!cJSON_IsString(value)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "String action required");
+        return ESP_FAIL;
+    }
+    std::string action = value->valuestring;
+    cJSON_Delete(root);
+    auto& app = Application::GetInstance();
+    auto config = app.GetMotorActionConfig();
+    struct Action { const char* name; int direction; int car::MotorActionConfig::*duration; };
+    const Action actions[] = {
+        {"move_forward", 4, &car::MotorActionConfig::forward_duration_ms},
+        {"move_backward", 2, &car::MotorActionConfig::backward_duration_ms},
+        {"turn_left", 3, &car::MotorActionConfig::left_turn_duration_ms},
+        {"turn_right", 1, &car::MotorActionConfig::right_turn_duration_ms},
+        {"spin_around", 3, &car::MotorActionConfig::spin_duration_ms},
+        {"quick_forward", 4, &car::MotorActionConfig::quick_forward_duration_ms},
+        {"quick_backward", 2, &car::MotorActionConfig::quick_backward_duration_ms}
+    };
+    for (const auto& entry : actions) {
+        if (action == entry.name) return SendMotorResult(req,
+            app.HandleMotorActionWithDuration(entry.direction, config.default_speed_percent, config.*(entry.duration)));
+    }
+    if (action == "stop") return SendMotorResult(req, app.HandleMotorActionWithDuration(0, 0, 0));
+    if (action == "wiggle" || action == "dance") return SendMotorResult(req, app.HandleMotorPattern(action, config.default_speed_percent));
+    for (const char* emotion : {"wake_up", "happy", "sad", "thinking", "listening", "speaking", "excited", "loving", "angry", "surprised", "confused"}) {
+        if (action == emotion) {
+            // 情绪动作兼容旧网页，只更新显示，不再隐式行驶。
+            std::string display_emotion = action == "wake_up" ? "sleepy" : action;
+            server->SetEmotion(display_emotion.c_str());
+            return SendMotorResult(req, true);
         }
     }
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
-
-esp_err_t WebServer::api_motor_action_handler(httpd_req_t *req) {
-    WebServer* server = (WebServer*)req->user_ctx;
-
-    // 设置CORS头
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-
-    char content[256];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
-        return ESP_FAIL;
-    }
-
-    cJSON *root = cJSON_Parse(content);
-    if (root == NULL) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
-    }
-
-    cJSON* action_json = cJSON_GetObjectItem(root, "action");
-    if (!cJSON_IsString(action_json)) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid action parameter");
-        return ESP_FAIL;
-    }
-
-    std::string action = action_json->valuestring;
-
-    // Get motor configuration for durations
-    MotorActionConfig config;
-    if (server->get_motor_config_callback_) {
-        config = server->get_motor_config_callback_();
-    }
-
-    // Call motor action functions directly (simulating MCP tool calls) with configured durations
-    try {
-        ESP_LOGI(TAG, "网页动作请求: %s", action.c_str());
-
-        if (action == "move_forward") {
-            ESP_LOGI(TAG, "执行前进动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.forward_duration_ms);
-            HandleMotorActionForApplication(4, config.default_speed_percent, config.forward_duration_ms, 1);
-        } else if (action == "move_backward") {
-            ESP_LOGI(TAG, "执行后退动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.backward_duration_ms);
-            HandleMotorActionForApplication(2, config.default_speed_percent, config.backward_duration_ms, 1);
-        } else if (action == "spin_around") {
-            ESP_LOGI(TAG, "执行转圈动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.spin_duration_ms);
-            HandleMotorActionForApplication(3, config.default_speed_percent, config.spin_duration_ms, 1);
-        } else if (action == "turn_left") {
-            ESP_LOGI(TAG, "执行左转动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.left_turn_duration_ms);
-            HandleMotorActionForApplication(3, config.default_speed_percent, config.left_turn_duration_ms, 1);
-        } else if (action == "turn_right") {
-            ESP_LOGI(TAG, "执行右转动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.right_turn_duration_ms);
-            HandleMotorActionForApplication(1, config.default_speed_percent, config.right_turn_duration_ms, 1);
-        } else if (action == "quick_forward") {
-            ESP_LOGI(TAG, "执行快速前进动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.quick_forward_duration_ms);
-            HandleMotorActionForApplication(4, config.default_speed_percent, config.quick_forward_duration_ms, 1);
-        } else if (action == "quick_backward") {
-            ESP_LOGI(TAG, "执行快速后退动作 - 速度:%d%%, 持续时间:%d ms", config.default_speed_percent, config.quick_backward_duration_ms);
-            HandleMotorActionForApplication(2, config.default_speed_percent, config.quick_backward_duration_ms, 1);
-        } else if (action == "wiggle") {
-            ESP_LOGI(TAG, "执行摆动动作 (情感:困惑)");
-            server->SetEmotion("confused");
-            HandleMotorActionForEmotion("confused");
-        } else if (action == "dance") {
-            ESP_LOGI(TAG, "执行跳舞动作 - 速度:%d%%", config.default_speed_percent);
-            server->SetEmotion("excited");
-            HandleMotorActionForDance(config.default_speed_percent);
-        } else if (action == "stop") {
-            ESP_LOGI(TAG, "执行停止动作");
-            HandleMotorActionForApplication(0, 0, 0, 2); // stop, high priority
-        } else if (action == "wake_up") {
-            ESP_LOGI(TAG, "执行唤醒情感动作");
-            server->SetEmotion("sleepy");  // 原版特殊动画：困倦效果
-            HandleMotorActionForEmotion("wake");
-        } else if (action == "happy") {
-            ESP_LOGI(TAG, "执行开心情感动作");
-            server->SetEmotion("laughing");  // 原版特殊动画：大笑动画
-            HandleMotorActionForEmotion("happy");
-        } else if (action == "sad") {
-            ESP_LOGI(TAG, "执行悲伤情感动作");
-            server->SetEmotion("crying");  // 原版特殊动画：哭泣动画
-            HandleMotorActionForEmotion("sad");
-        } else if (action == "thinking") {
-            ESP_LOGI(TAG, "执行思考情感动作");
-            server->SetEmotion("thinking");  // 原版特殊动画：思考动画
-            HandleMotorActionForEmotion("thinking");
-        } else if (action == "listening") {
-            ESP_LOGI(TAG, "执行倾听情感动作");
-            server->SetEmotion("wink");  // 原版特殊动画：眨眼动画
-            HandleMotorActionForEmotion("listening");
-        } else if (action == "speaking") {
-            ESP_LOGI(TAG, "执行说话情感动作");
-            server->SetEmotion("funny");  // 原版特殊动画：搞笑动画
-            HandleMotorActionForEmotion("speaking");
-        } else if (action == "excited") {
-            ESP_LOGI(TAG, "执行兴奋情感动作");
-            server->SetEmotion("shocked");  // 原版特殊动画：震惊动画
-            HandleMotorActionForEmotion("excited");
-        } else if (action == "loving") {
-            ESP_LOGI(TAG, "执行爱慕情感动作");
-            server->SetEmotion("kissy");  // 原版特殊动画：亲吻动画
-            HandleMotorActionForEmotion("loving");
-        } else if (action == "angry") {
-            ESP_LOGI(TAG, "执行生气情感动作");
-            server->SetEmotion("angry");  // 基础表情（生气）
-            HandleMotorActionForEmotion("angry");
-        } else if (action == "surprised") {
-            ESP_LOGI(TAG, "执行惊讶情感动作");
-            server->SetEmotion("surprised");  // 基础表情（惊讶）
-            HandleMotorActionForEmotion("surprised");
-        } else if (action == "confused") {
-            ESP_LOGI(TAG, "执行困惑情感动作");
-            server->SetEmotion("confused");  // 原版特殊动画：困惑动画
-            HandleMotorActionForEmotion("confused");
-        } else {
-            cJSON_Delete(root);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown action");
-            return ESP_FAIL;
-        }
-    } catch (const std::exception& e) {
-        ESP_LOGE(TAG, "Failed to execute motor action %s: %s", action.c_str(), e.what());
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to execute action");
-        return ESP_FAIL;
-    }
-
-    cJSON_Delete(root);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"status\":\"ok\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown action");
+    return ESP_FAIL;
 }
 
 void WebServer::parse_simple_control_command(const char* data, int& direction, int& speed) {
-    // 简单解析格式：direction=X,speed=Y
-    char* str = strdup(data);
-    char* token = strtok(str, ",");
-
-    direction = 0;
-    speed = 0;
-
-    while (token != NULL) {
-        if (strstr(token, "direction=")) {
-            direction = atoi(token + 10);
-        } else if (strstr(token, "speed=")) {
-            speed = atoi(token + 6);
-        }
-        token = strtok(NULL, ",");
+    direction = speed = -1;
+    std::string body(data);
+    size_t start = 0;
+    while (start < body.size()) {
+        size_t end = body.find(',', start);
+        std::string item = body.substr(start, end == std::string::npos ? end : end - start);
+        size_t equal = item.find('=');
+        int value = 0;
+        if (equal == std::string::npos || !ParseIntegerText(item.substr(equal + 1), value)) { direction = speed = -1; return; }
+        std::string key = item.substr(0, equal);
+        if (key == "direction") direction = value;
+        else if (key == "speed") speed = value;
+        else { direction = speed = -1; return; }
+        if (end == std::string::npos) break;
+        start = end + 1;
     }
-
-    free(str);
 }
 
 const char* WebServer::get_html_page() {
@@ -747,7 +663,10 @@ const char* WebServer::get_html_page() {
         let centerY = 0;
         let currentDirection = 0;
         let currentSpeed = 0;
-        let isRequestPending = false; // 防止并发请求
+        let isRequestPending = false;
+        let pendingControl = null;
+        let controlDrain = Promise.resolve(true);
+        let inputGeneration = 0;
 
 
         // 初始化摇杆中心位置
@@ -826,79 +745,57 @@ const char* WebServer::get_html_page() {
             directionIndicator.classList.toggle('active', speed > 5);
         }
 
-        // 发送控制命令
-        // 发送控制命令
-        async function sendControl(direction, speed) {
-            // 停止命令(0, 0)优先处理，不受并发限制
-            if (direction === 0 && speed === 0) {
-                currentDirection = 0;
-                currentSpeed = 0;
-                try {
-                    const response = await fetch('/api/control', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            direction: 0,
-                            speed: 0
-                        })
-                    });
-                    if (!response.ok) {
-                        throw new Error('Network response was not ok');
-                    }
-                    statusText.textContent = '已连接';
-                    document.getElementById('status').className = 'status connected';
-                } catch (error) {
-                    console.error('Failed to send stop control:', error);
-                    statusText.textContent = '连接错误';
-                    document.getElementById('status').className = 'status error';
-                }
-                return;
-            }
-
-            if (direction === currentDirection && speed === currentSpeed) {
-                return; // 避免重复发送相同命令
-            }
-
-            // 如果有请求正在进行中，跳过
-            if (isRequestPending) {
-                return;
-            }
-
+        // 保留最新待发指令；请求超时后停止交互，由固件租约兜底。
+        function sendControl(direction, speed) {
             currentDirection = direction;
             currentSpeed = speed;
+            pendingControl = { direction, speed };
+            if (!isRequestPending) controlDrain = drainControls();
+            return controlDrain;
+        }
+
+        async function drainControls() {
             isRequestPending = true;
-
+            let accepted = true;
             try {
-                const response = await fetch('/api/control', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        direction: direction,
-                        speed: speed
-                    })
-                });
-
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
+                while (pendingControl) {
+                    const command = pendingControl;
+                    pendingControl = null;
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 500);
+                    try {
+                        const response = await fetch('/api/control', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(command), signal: controller.signal
+                        });
+                        if (!response.ok) throw new Error('Control rejected');
+                        statusText.textContent = '指令已接受';
+                        document.getElementById('status').className = 'status connected';
+                    } catch (error) {
+                        accepted = false;
+                        isDragging = false;
+                        currentDirection = currentSpeed = 0;
+                        pendingControl = null;
+                        statusText.textContent = '连接异常，停止遥控';
+                        document.getElementById('status').className = 'status error';
+                        // 尽力补发停止，失败时最后一条有效心跳将在 750ms 后失效。
+                        void fetch('/api/control', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ direction: 0, speed: 0 }), keepalive: true
+                        }).catch(() => {});
+                    } finally {
+                        clearTimeout(timeout);
+                    }
                 }
-
-                statusText.textContent = '已连接';
-                document.getElementById('status').className = 'status connected';
-            } catch (error) {
-                console.error('Failed to send control:', error);
-                statusText.textContent = '连接错误';
-                document.getElementById('status').className = 'status error';
             } finally {
                 isRequestPending = false;
             }
+            return accepted;
         }
 
         // 停止小车
         function stopCar() {
+            ++inputGeneration;
             // 重置状态
             isDragging = false;
             currentDirection = 0;
@@ -911,12 +808,18 @@ const char* WebServer::get_html_page() {
             updateDirectionIndicator(0, 0);
 
             // 发送停止命令
-            sendControl(0, 0);
+            return sendControl(0, 0);
         }
 
 
         // 执行电机动作
         async function executeAction(action) {
+            // 先结束摇杆租约，防止心跳立刻覆盖按钮动作。
+            const stopping = stopCar();
+            const generation = inputGeneration;
+            const accepted = await stopping;
+            // 等待停车期间若用户再次停止或开始新操作，不能补发过时的按钮动作。
+            if (!accepted || generation !== inputGeneration) return;
             try {
                 const response = await fetch('/api/motor/action', {
                     method: 'POST',
@@ -936,7 +839,7 @@ const char* WebServer::get_html_page() {
                 console.log('Action executed:', action, result);
 
                 // 更新状态显示
-                statusText.textContent = '动作执行成功';
+                statusText.textContent = '指令已接受（实车效果待确认）';
                 document.getElementById('status').className = 'status connected';
 
             } catch (error) {
@@ -972,6 +875,7 @@ const char* WebServer::get_html_page() {
 
         // 触摸事件
         joystickContainer.addEventListener('touchstart', (e) => {
+            ++inputGeneration;
             e.preventDefault();
             isDragging = true;
             joystick.classList.add('active');
@@ -1013,6 +917,18 @@ const char* WebServer::get_html_page() {
             }
         }, 200); // 每200ms发送一次，减少服务器压力
 
+        joystickContainer.addEventListener('touchcancel', stopCar);
+        window.addEventListener('blur', stopCar);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) stopCar(); });
+        window.addEventListener('pagehide', () => {
+            ++inputGeneration;
+            isDragging = false;
+            void fetch('/api/control', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ direction: 0, speed: 0 }), keepalive: true
+            }).catch(() => {});
+        });
+
         // 初始化
         initJoystick();
         window.addEventListener('resize', initJoystick);
@@ -1024,29 +940,6 @@ const char* WebServer::get_html_page() {
     return html_page;
 }
 
-
-// 解析JSON控制命令
-void WebServer::parse_json_control_command(const char* data, int& direction, int& speed) {
-    cJSON *json = cJSON_Parse(data);
-    if (json == NULL) {
-        direction = 0;
-        speed = 0;
-        return;
-    }
-
-    cJSON *j_direction = cJSON_GetObjectItem(json, "direction");
-    cJSON *j_speed = cJSON_GetObjectItem(json, "speed");
-
-    if (cJSON_IsNumber(j_direction) && cJSON_IsNumber(j_speed)) {
-        direction = j_direction->valueint;
-        speed = j_speed->valueint;
-    } else {
-        direction = 0;
-        speed = 0;
-    }
-
-    cJSON_Delete(json);
-}
 
 // 配置页面处理器
 esp_err_t WebServer::config_get_handler(httpd_req_t *req) {
@@ -1073,15 +966,14 @@ esp_err_t WebServer::config_post_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 
     char content[512];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
-        return ESP_FAIL;
-    }
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
 
     // 解析表单数据
-    MotorActionConfig config;
-    server->parse_config_form_data(content, config);
+    MotorActionConfig config = server->get_motor_config_callback_ ? server->get_motor_config_callback_() : MotorActionConfig{};
+    if (!server->parse_config_form_data(content, config) || !config.IsValid()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid motor configuration");
+        return ESP_FAIL;
+    }
 
     // 保存配置
     if (server->set_motor_config_callback_) {
@@ -1215,14 +1107,7 @@ esp_err_t WebServer::api_config_get_handler(httpd_req_t *req) {
         MotorActionConfig config = server->get_motor_config_callback_();
 
         cJSON *root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "forward_ms", config.forward_duration_ms);
-        cJSON_AddNumberToObject(root, "backward_ms", config.backward_duration_ms);
-        cJSON_AddNumberToObject(root, "left_turn_ms", config.left_turn_duration_ms);
-        cJSON_AddNumberToObject(root, "right_turn_ms", config.right_turn_duration_ms);
-        cJSON_AddNumberToObject(root, "spin_ms", config.spin_duration_ms);
-        cJSON_AddNumberToObject(root, "quick_fwd_ms", config.quick_forward_duration_ms);
-        cJSON_AddNumberToObject(root, "quick_bwd_ms", config.quick_backward_duration_ms);
-        cJSON_AddNumberToObject(root, "def_speed_pct", config.default_speed_percent);
+        for (const auto& field : kConfigFields) cJSON_AddNumberToObject(root, field.key, config.*(field.member));
 
         char *json_str = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
@@ -1251,30 +1136,25 @@ esp_err_t WebServer::api_config_post_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 
     char content[512];
-    int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
-        return ESP_FAIL;
-    }
+    if (!ReadBody(req, content, sizeof(content))) return ESP_FAIL;
 
     // 解析JSON数据
-    cJSON *root = cJSON_Parse(content);
+    cJSON *root = ParseObject(content);
     if (root == NULL) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_FAIL;
     }
 
-    MotorActionConfig config;
-    config.forward_duration_ms = cJSON_GetObjectItem(root, "forward_ms")->valueint;
-    config.backward_duration_ms = cJSON_GetObjectItem(root, "backward_ms")->valueint;
-    config.left_turn_duration_ms = cJSON_GetObjectItem(root, "left_turn_ms")->valueint;
-    config.right_turn_duration_ms = cJSON_GetObjectItem(root, "right_turn_ms")->valueint;
-    config.spin_duration_ms = cJSON_GetObjectItem(root, "spin_ms")->valueint;
-    config.quick_forward_duration_ms = cJSON_GetObjectItem(root, "quick_fwd_ms")->valueint;
-    config.quick_backward_duration_ms = cJSON_GetObjectItem(root, "quick_bwd_ms")->valueint;
-    config.default_speed_percent = cJSON_GetObjectItem(root, "def_speed_pct")->valueint;
-
+    MotorActionConfig config = server->get_motor_config_callback_ ? server->get_motor_config_callback_() : MotorActionConfig{};
+    bool valid = cJSON_IsObject(root);
+    for (const auto& field : kConfigFields) {
+        valid = valid && ReadInteger(root, field.key, config.*(field.member), false);
+    }
     cJSON_Delete(root);
+    if (!valid || !config.IsValid()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Motor durations must be 100..10000ms and speed 0..100");
+        return ESP_FAIL;
+    }
 
     // 保存配置
     if (server->set_motor_config_callback_) {
@@ -1301,39 +1181,26 @@ esp_err_t WebServer::api_config_post_handler(httpd_req_t *req) {
 }
 
 // 解析配置表单数据
-void WebServer::parse_config_form_data(const char* data, MotorActionConfig& config) {
-    char* str = strdup(data);
-    char* token = strtok(str, "&");
-
-    while (token != NULL) {
-        char* eq_pos = strchr(token, '=');
-        if (eq_pos) {
-            *eq_pos = '\0';
-            char* key = token;
-            char* value = eq_pos + 1;
-
-            if (strcmp(key, "forward_ms") == 0) {
-                config.forward_duration_ms = atoi(value);
-            } else if (strcmp(key, "backward_ms") == 0) {
-                config.backward_duration_ms = atoi(value);
-            } else if (strcmp(key, "left_turn_ms") == 0) {
-                config.left_turn_duration_ms = atoi(value);
-            } else if (strcmp(key, "right_turn_ms") == 0) {
-                config.right_turn_duration_ms = atoi(value);
-            } else if (strcmp(key, "spin_ms") == 0) {
-                config.spin_duration_ms = atoi(value);
-            } else if (strcmp(key, "quick_fwd_ms") == 0) {
-                config.quick_forward_duration_ms = atoi(value);
-            } else if (strcmp(key, "quick_bwd_ms") == 0) {
-                config.quick_backward_duration_ms = atoi(value);
-            } else if (strcmp(key, "def_speed_pct") == 0) {
-                config.default_speed_percent = atoi(value);
-            }
+bool WebServer::parse_config_form_data(const char* data, MotorActionConfig& config) {
+    std::string body(data);
+    size_t start = 0;
+    while (start < body.size()) {
+        size_t end = body.find('&', start);
+        std::string item = body.substr(start, end == std::string::npos ? end : end - start);
+        size_t equal = item.find('=');
+        if (equal == std::string::npos) return false;
+        std::string key = item.substr(0, equal);
+        int value = 0;
+        if (!ParseIntegerText(item.substr(equal + 1), value)) return false;
+        bool known = false;
+        for (const auto& field : kConfigFields) {
+            if (key == field.key) { config.*(field.member) = value; known = true; break; }
         }
-        token = strtok(NULL, "&");
+        if (!known) return false;
+        if (end == std::string::npos) break;
+        start = end + 1;
     }
-
-    free(str);
+    return config.IsValid();
 }
 
 // 获取配置页面HTML
@@ -1462,14 +1329,14 @@ const char* WebServer::get_config_html_page() {
             <div class="grid">
                 <div class="form-group">
                     <label for="forward_ms">前进时间</label>
-                    <input type="number" id="forward_ms" name="forward_ms" min="100" max="30000" step="100" required>
+                    <input type="number" id="forward_ms" name="forward_ms" min="100" max="10000" step="100" required>
                     <span class="unit">毫秒</span>
                     <div class="description">默认前进动作的持续时间</div>
                 </div>
 
                 <div class="form-group">
                     <label for="backward_ms">后退时间</label>
-                    <input type="number" id="backward_ms" name="backward_ms" min="100" max="30000" step="100" required>
+                    <input type="number" id="backward_ms" name="backward_ms" min="100" max="10000" step="100" required>
                     <span class="unit">毫秒</span>
                     <div class="description">默认后退动作的持续时间</div>
                 </div>
@@ -1498,7 +1365,7 @@ const char* WebServer::get_config_html_page() {
 
                 <div class="form-group">
                     <label for="def_speed_pct">默认速度</label>
-                    <input type="number" id="def_speed_pct" name="def_speed_pct" min="10" max="100" step="5" required>
+                    <input type="number" id="def_speed_pct" name="def_speed_pct" min="0" max="100" step="5" required>
                     <span class="unit">%</span>
                     <div class="description">电机动作的默认速度百分比</div>
                 </div>
@@ -1532,7 +1399,7 @@ const char* WebServer::get_config_html_page() {
             e.preventDefault(); // 阻止默认表单提交
 
             const formData = new FormData(this);
-            const data = Object.fromEntries(formData.entries());
+            const data = Object.fromEntries([...formData.entries()].map(([key, value]) => [key, Number(value)]));
 
             fetch('/api/config', {
                 method: 'POST',

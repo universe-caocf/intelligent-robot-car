@@ -2,7 +2,7 @@
 
 面向公司内部项目比赛的语音交互小车项目，目标是结合 ESP32-S3、七牛灵矽和软弹互动机构。
 
-目前处于从 `v0` codebase 逐步开发的阶段，已补齐开发工具、收敛为 ESP32-S3 单小车工程，并预置灵矽 OTA/接入地址与接入排错日志。底盘控制修正和炮塔尚未导入；云端绑定、语音及 MCP 仍待实机验证。
+目前处于从 `v0` codebase 逐步开发的阶段，已补齐开发工具、收敛为 ESP32-S3 单小车工程，并预置灵矽 OTA/接入地址与接入排错日志。底盘统一执行器、遥控租约与无硬件测试已补齐；炮塔尚未导入，云端绑定、语音、MCP 和实车动作仍待验证。
 
 ## 开始开发
 
@@ -19,7 +19,8 @@ cd intelligent-robot-car
 
 - [构建、烧录和排错](docs/build.md)
 - [灵矽接入、配网与首轮验证](docs/linx-setup.md)
-- [接入阶段智能体提示词](docs/agent-prompt.md)
+- [分阶段智能体提示词](docs/agent-prompt.md)
+- [底盘规则、状态接口与主机测试](docs/chassis-control.md)
 - [分支与 PR 开发流程](docs/development.md)
 - [工程目录、裁剪范围与兼容说明](docs/repository.md)
 - [codebase 来源和基线说明](CODEBASE.md)
