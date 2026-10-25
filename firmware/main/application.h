@@ -185,6 +185,7 @@ private:
     car::MotorControl motor_control_;
     TaskHandle_t motor_task_handle_ = nullptr;
     bool motor_network_available_ = false;
+    bool motor_maintenance_mode_ = false;
     bool motor_pwm_initialized_ = false;
     bool motor_hardware_fault_ = false;
     int applied_motor_direction_ = 0;
@@ -195,6 +196,7 @@ private:
     void StopMotorOutputLocked();
     bool StopMotorControl(const char* reason);
     void SetMotorNetworkAvailable(bool available);
+    void SetMotorMaintenanceMode(bool active);
     void ConfigureLocalWebServer();
     void StartLocalWebServer();
 

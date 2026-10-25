@@ -480,6 +480,7 @@ void Application::CheckAssetsVersion() {
     std::string download_url = settings.GetString("download_url");
 
     if (!download_url.empty()) {
+        SetMotorMaintenanceMode(true);
         settings.EraseKey("download_url");
 
         char message[256];
@@ -507,12 +508,17 @@ void Application::CheckAssetsVersion() {
             Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
+            SetMotorMaintenanceMode(false);
             return;
         }
     }
 
     // Apply assets
     assets.Apply();
+    if (!download_url.empty()) {
+        SetDeviceState(kDeviceStateActivating);
+        SetMotorMaintenanceMode(false);
+    }
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
 }
@@ -1103,6 +1109,7 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 void Application::Reboot() {
+    SetMotorMaintenanceMode(true);
     StopMotorControl("reboot");
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
@@ -1117,6 +1124,8 @@ void Application::Reboot() {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+    const auto previous_state = GetDeviceState();
+    SetMotorMaintenanceMode(true);
     StopMotorControl("firmware upgrade");
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -1161,6 +1170,8 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
+        SetDeviceState(previous_state == kDeviceStateActivating ? kDeviceStateActivating : kDeviceStateIdle);
+        SetMotorMaintenanceMode(false);
         return false;
     } else {
         // Upgrade success, reboot immediately

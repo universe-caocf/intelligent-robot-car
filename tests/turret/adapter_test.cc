@@ -135,6 +135,20 @@ int main() {
         assert(!controller.CanSleep());
         assert(controller.GetStatus().find("\"hardware_fault\":true") != std::string::npos);
     }
+    ResetRuntime();
+    {
+        TurretController controller(Config()); assert(controller.Initialize());
+        controller.SetNetworkAvailable(true); Start(controller, 3); Tick(700);
+        controller.SetMaintenanceMode(true); AllStopped();
+        assert(!controller.CanSleep());
+        controller.SetNetworkAvailable(false); controller.SetNetworkAvailable(true);
+        assert(!controller.Request(1) && !controller.SetTilt(90) && !controller.ConfirmPhysical());
+        assert(controller.GetStatus().find("\"maintenance_mode\":true") != std::string::npos);
+        controller.SetMaintenanceMode(false); Tick(10000); AllStopped();
+        assert(controller.CanSleep());
+        assert(!controller.ConfirmPhysical());
+        assert(controller.Request(1)); controller.Disarm("test end"); AllStopped();
+    }
     for (int failure = 0; failure < 4; ++failure) {
         ResetRuntime(); TurretController controller(Config()); assert(controller.Initialize());
         controller.SetNetworkAvailable(true);
@@ -164,6 +178,11 @@ int main() {
         Start(turret); app.SetMotorNetworkAvailable(false); AllStopped();
         app.SetMotorNetworkAvailable(true); Tick(20000); AllStopped();
         assert(!turret.ConfirmPhysical());
+        Start(turret); assert(app.HandleWebMotorControl(4, 80));
+        app.SetMotorMaintenanceMode(true); AllStopped();
+        app.SetMotorNetworkAvailable(false); app.SetMotorNetworkAvailable(true);
+        assert(!turret.Request(1) && !app.HandleWebMotorControl(4, 80));
+        app.SetMotorMaintenanceMode(false); Tick(30000); AllStopped();
     }
 #endif
     std::cout << "PASS: production turret adapter, build mode=" << CONFIG_CAR_TURRET_ENABLED

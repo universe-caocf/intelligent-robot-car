@@ -25,6 +25,8 @@ public:
     void StopMotorOutputLocked();
     bool StopMotorControl(const char*);
     void SetMotorNetworkAvailable(bool);
+    void SetMotorMaintenanceMode(bool);
+    bool motor_maintenance_mode_ = false;
     MotorActionConfig motor_action_config_;
     std::mutex motor_config_mutex_, motor_mutex_;
     car::MotorControl motor_control_;

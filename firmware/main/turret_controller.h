@@ -28,6 +28,7 @@ public:
     bool ConfirmPhysical();
     bool Disarm(const char* reason);
     void SetNetworkAvailable(bool available);
+    void SetMaintenanceMode(bool active);
     bool SetTilt(int angle);
     bool CanSleep();
     std::string GetStatus();
@@ -43,6 +44,7 @@ private:
     bool attempted_ = false, initialized_ = false, network_available_ = false;
     bool flywheel_touched_ = false, push_touched_ = false, tilt_touched_ = false;
     bool physical_press_eligible_ = false;
+    bool maintenance_mode_ = false;
     int tilt_pulse_us_ = 0;
     int64_t tilt_deadline_ms_ = 0;
     std::string reason_ = "startup";
