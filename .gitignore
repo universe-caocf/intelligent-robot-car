@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+!.env.example
+.local-backups/
+
+# 本地生成配置、工具缓存和构建产物不进入源码历史。
+/firmware/build*/
+/firmware/managed_components/
+/firmware/sdkconfig
+/firmware/sdkconfig.old

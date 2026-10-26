@@ -18,6 +18,7 @@
 #include "device_state_machine.h"
 #include <atomic>
 #include "web_server/web_server.h"
+#include "motor_control.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -125,33 +126,18 @@ public:
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
 
-    // Motor action configuration
-    struct MotorActionConfig {
-        int forward_duration_ms = 5000;
-        int backward_duration_ms = 5000;
-        int left_turn_duration_ms = 600;
-        int right_turn_duration_ms = 600;
-        int spin_duration_ms = 2500;
-        int wiggle_duration_ms = 600;
-        int dance_duration_ms = 1500;
-        int quick_forward_duration_ms = 5000;
-        int quick_backward_duration_ms = 5000;
-        int default_speed_percent = 100;
-    };
-
+    using MotorActionConfig = car::MotorActionConfig;
     void LoadMotorActionConfig();
     void SaveMotorActionConfig();
-    const MotorActionConfig& GetMotorActionConfig() const { return motor_action_config_; }
+    MotorActionConfig GetMotorActionConfig();
     void SetMotorActionConfig(const MotorActionConfig& config);
 
-    // Motor control
-    void MotorControlTask();
-    void TriggerMotorControl();
-    void TriggerMotorEmotion(int emotion_type);
-    void HandleWebMotorControl(int direction, int speed);
-    void HandleMotorActionWithDuration(int direction, int speed, int duration_ms, int priority = 1);
-    void QueueMotorAction(int direction, int speed, int duration_ms, const std::string& description);
-    void ExecuteMotorActionQueue();
+    // 所有入口经过同一个状态机；接受指令不表示实车已到位。
+    bool HandleWebMotorControl(int direction, int speed);
+    bool HandleMotorActionWithDuration(int direction, int speed, int duration_ms, int priority = 2);
+    bool HandleMotorSequence(const car::MotorStep* steps, size_t count);
+    bool HandleMotorPattern(const std::string& pattern, int speed);
+    std::string GetMotorStatus();
 
     /**
      * Reset protocol resources (thread-safe)
@@ -159,6 +145,8 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
+    // 配网服务也使用80端口，进入配网前先停止动作和本地遥控服务。
+    void PrepareForWifiConfig();
 
 private:
     Application();
@@ -184,34 +172,33 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
-    // Motor control task
-
     // Web server for remote control
     std::unique_ptr<WebServer> web_server_;
+    std::mutex local_web_mutex_;
+    bool local_web_network_available_ = false;
 
-    // Motor action configuration
     MotorActionConfig motor_action_config_;
+    std::mutex motor_config_mutex_;
 
-    // Real-time motor control support
-    std::atomic<bool> realtime_control_active_{false};
-    std::atomic<int> current_motor_priority_{0}; // Current motor action priority
-    // Initialize motor gpio on demand in a thread-safe way
-    std::mutex motor_gpio_init_mutex_;
-    bool motor_gpio_initialized_member_ = false;
-
-    // API for realtime control (bypass queue)
-    void SetRealtimeMotorCommand(int direction, int speed);
-    void StopRealtimeMotorControl();
-    // Timestamp (ms) of last realtime command, used for watchdog to auto-stop
-    std::atomic<int64_t> last_realtime_command_ms_{0};
-    // PWM (LEDC) support
-    bool motor_pwm_initialized_member_ = false;
-    int pwm_freq_hz_ = 20000;
-    int pwm_resolution_bits_ = 10;
-    void InitMotorPwm();
-    // Ramp (ms) for PWM fade
-    int pwm_ramp_ms_ = 50;
-
+    // 一把锁保护状态机、任务创建和 PWM 输出，避免停止与新指令交错。
+    std::mutex motor_mutex_;
+    car::MotorControl motor_control_;
+    TaskHandle_t motor_task_handle_ = nullptr;
+    bool motor_network_available_ = false;
+    bool motor_maintenance_mode_ = false;
+    bool motor_pwm_initialized_ = false;
+    bool motor_hardware_fault_ = false;
+    int applied_motor_direction_ = 0;
+    int applied_motor_speed_ = 0;
+    bool EnsureMotorTaskLocked();
+    bool ApplyMotorOutputLocked();
+    bool InitMotorPwmLocked();
+    void StopMotorOutputLocked();
+    bool StopMotorControl(const char* reason);
+    void SetMotorNetworkAvailable(bool available);
+    void SetMotorMaintenanceMode(bool active);
+    void ConfigureLocalWebServer();
+    void StartLocalWebServer();
 
     // Event handlers
     void HandleStateChangedEvent();

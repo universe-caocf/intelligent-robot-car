@@ -1,0 +1,5 @@
+# 本项目的小车构建预设。
+CONFIG_BOARD_TYPE_INTELLIGENT_CAR=y
+CONFIG_OLED_SSD1306_128X64=y
+# 灵矽公开接入入口；连接凭据由服务端下发，不写入仓库。
+CONFIG_OTA_URL="https://xrobo.qiniuapi.com/v1/ota/"

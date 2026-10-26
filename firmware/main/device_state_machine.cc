@@ -61,6 +61,7 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
             // Can go to upgrading, idle, or back to wifi configuring (on error)
             return to == kDeviceStateUpgrading ||
                    to == kDeviceStateIdle ||
+                   to == kDeviceStateStarting || // 激活任务创建失败后回到可重试状态。
                    to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateUpgrading:
