@@ -24,10 +24,12 @@
 | self.turret.get_status | 查询状态、网络、故障、申请数量与推弹周期，不触发动作 |
 | self.turret.prepare(count=1) | 申请1–3个推弹周期，返回待实体确认，不能报告已发射 |
 | self.turret.disarm | 取消申请及整个序列，关闭飞轮、推弹和俯仰脉冲 |
-| self.turret.set_tilt(angle) | 可选俯仰，舵机命令角度60–120，仅 disarmed；2秒后撤销脉冲 |
+| self.turret.set_tilt(angle) | 可选俯仰，命令范围可配置（默认60–120），仅 disarmed；2秒后撤销脉冲 |
 | self.motor.stop | 兼容原名，全局停止底盘与炮塔 |
 
 没有 self.turret.arm、fire、confirm 等可绕开实体确认的远程入口。错误通过现有 MCP ReplyError 返回。requested_cycles 是当前申请数；completed_feed_cycles 只是已完成的软件推弹周期，不是射出数、弹仓余量或命中数。enabled/initialized/hardware_fault 与 reason 用于排查；计数在新申请时重置。
+
+maintenance_mode=true表示固件/资源升级或重启维护中，申请与俯仰均拒绝，已有申请/输出取消；重新联网不能解除维护锁。退出维护后仍需新申请。维护期间不进入休眠。
 
 ## 配置与引脚
 
@@ -45,12 +47,28 @@
 | CAR_TURRET_REST_US / PUSH_US | 1000 / 1500 | 推弹舵机休止/推入脉宽，必须实测行程 |
 | CAR_TURRET_SPIN_MS | 700 | 飞轮预转，不代表达到足够转速 |
 | CAR_TURRET_PUSH_MS / RECOVER_MS | 250 / 450 | 推弹保持 / 回位与间隔 |
+| CAR_TURRET_TILT_MIN_US / MAX_US | 500 / 2500 | 命令0 / 180度对应的脉宽端点 |
+| CAR_TURRET_TILT_MIN_ANGLE / MAX_ANGLE | 60 / 120 | 允许的命令角度范围，不是实测炮口角度 |
 
-以上全部是未标定的软件初值，不能视为机构安全参数。舵机50Hz、14bit PWM，使用 timer2 / channel4（推弹）与 channel5（俯仰），避开底盘 timer0 / channel0–3。俯仰采用500–2500us映射0–180度、仅开放60–120命令范围，也必须先核对舵机型号和实际机构行程。启动时所有舵机脉冲为0，不自动执行归零动作。
+以上全部是未标定的软件初值，不能视为机构安全参数。舵机50Hz、14bit PWM，使用 timer2 / channel4（推弹）与 channel5（俯仰），避开底盘 timer0 / channel0–3。俯仰默认采用500–2500us映射0–180度、仅开放60–120命令范围；映射端点与允许角度均可配置，必须先核对舵机型号和实际机构行程。启动时所有舵机脉冲为0，不自动执行归零动作。
 
 当前板型候选扩展脚仅允许8、9、10、11、17、38，各机构和按钮必须互不重复。主机测试使用8/9/11/10只是替身配置，不是量产接线推荐。必须核对实际开发板这些脚是否引出、是否另接外设、Flash/PSRAM与启动配置；不匹配时先修改板级适配和测试，不能为了通过校验随便换脚。
 
 飞轮电机需要独立额定供电、合适 MOSFET/驱动模块及感性负载保护，ESP32 GPIO 不能供电或直接驱动。MOSFET 控制端须有外部下拉，防止上电到固件初始化前悬空启动；按钮断线应无法确认。舵机电源不能凭空假定可由开发板3.3V提供；电源额定值、电流峰值、共地及2S电池满电8.4V是否匹配需按器件规格核对。断电后不应因恢复供电而自动继续旧序列。
+
+## 局域网调试接口
+
+Wi-Fi连上后即可使用，不需要先激活云端。将下例地址替换为实际STA地址，只在受控局域网操作：
+
+~~~bash
+curl http://192.0.2.1/api/turret/status
+curl -H 'Content-Type: application/json' -d '{"count":1}' http://192.0.2.1/api/turret/prepare
+curl -H 'Content-Type: application/json' -d '{}' http://192.0.2.1/api/turret/disarm
+~~~
+
+prepare仅申请1–3周期，省略count默认1，不打开飞轮；仍须独立实体按钮确认。没有远程confirm/fire路由。非法输入返回400，未启用、断网、忙或故障拒绝返回503；disarm撤销输出但不清除故障。HTTP接受不代表实物发射。带Origin的POST只接受同源请求，无Origin的CLI兼容不代表具备鉴权。
+
+俯仰脉宽端点和允许角度均可配置。配置预览、备份应用与一键检查见 [构建说明](build.md#硬件参数配置与完整检查)。
 
 ## 无硬件验证
 
@@ -75,6 +93,8 @@ CAR_TEST_SANITIZE=1 ./tools/test-chassis.sh
 5. 完成灵矽语音/MCP联调并录制 demo，记录实物型号、参数和结果后再发布可演示版本。
 
 准备代码完成不代表硬件验收完成；机构结构、供电和行程仍是主要未验证项。
+
+以下为第五步历史验证；后续补漏、维护锁与最新构建结果见 [准备审计](preparation-status.md)。
 
 ## 本阶段验证记录（2026-10-26）
 

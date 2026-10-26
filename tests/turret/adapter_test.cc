@@ -22,18 +22,21 @@ int main() {
     {
         TurretHardwareConfig config; TurretController disabled(config);
         assert(!disabled.Initialize() && !disabled.Request(1) && !disabled.ConfirmPhysical());
+        assert(disabled.CanSleep());
         disabled.SetNetworkAvailable(true); assert(disabled.Disarm("stop"));
         assert(disabled.GetStatus().find("disabled") != std::string::npos);
         assert(gpio_calls == 0 && task_creations == 0 && timer_configs.empty() && writes.empty());
         assert(TurretHardwareConfig::FromBuildConfig().enabled == static_cast<bool>(CONFIG_CAR_TURRET_ENABLED));
     }
-    for (int bad = 0; bad < 5; ++bad) {
+    for (int bad = 0; bad < 7; ++bad) {
         ResetRuntime(); auto config = Config();
         if (bad == 0) config.flywheel_gpio = -1;
         if (bad == 1) config.confirm_gpio = config.push_gpio;
         if (bad == 2) config.push_gpio = 12; // 底盘占用脚
         if (bad == 3) config.rest_us = config.push_us;
         if (bad == 4) config.timing.spin_ms = 0;
+        if (bad == 5) config.tilt_min_us = config.tilt_max_us;
+        if (bad == 6) config.tilt_min_angle = config.tilt_max_angle;
         TurretController controller(config);
         assert(!controller.Initialize() && gpio_calls == 0 && timer_configs.empty());
         assert(controller.GetStatus().find("invalid_wiring") != std::string::npos);
@@ -41,6 +44,7 @@ int main() {
     ResetRuntime();
     {
         TurretController controller(Config()); assert(controller.Initialize()); AllStopped();
+        assert(controller.CanSleep());
         assert((timer_configs == std::vector<std::pair<int, int>>{{2, 14}}));
         assert((configured_channels == std::vector<int>{4, 5}));
         assert(!controller.Request(1)); // 离线不得动作
@@ -48,9 +52,11 @@ int main() {
         input_levels[11] = 0;
         assert(!controller.BeginPhysicalConfirmation()); // 先按住，后申请，不算确认
         assert(controller.Request(2) && !controller.ConfirmPhysical()); AllStopped();
+        assert(!controller.CanSleep());
         assert(!controller.Request(3));
         assert(controller.BeginPhysicalConfirmation() && controller.ConfirmPhysical());
         assert(duties[8] == 1 && duties[4] == 1000 * 16383 / 20000);
+        assert(!controller.CanSleep());
         assert(!controller.ConfirmPhysical() && !controller.SetTilt(90));
         test_now = 700;
         auto before = writes.size();
@@ -67,10 +73,12 @@ int main() {
         Tick(test_now); AllStopped();
         assert(controller.GetStatus().find("disarmed") != std::string::npos);
         assert(controller.SetTilt(90) && duties[5] == 1500 * 16383 / 20000);
+        assert(!controller.CanSleep());
         assert(!controller.SetTilt(59) && !controller.SetTilt(121));
         Tick(test_now + 2000); assert(duties[5] == 0); // 俯仰输出不会无限保持堵转
         assert(controller.SetTilt(90));
         assert(controller.Disarm("release")); AllStopped();
+        assert(controller.CanSleep());
     }
     for (int phase = 0; phase < 4; ++phase) {
         ResetRuntime(); TurretController controller(Config()); assert(controller.Initialize());
@@ -89,6 +97,18 @@ int main() {
         input_levels[11] = 1; Tick(720); AllStopped(); // 模拟释放回调缺失，GPIO轮询仍取消
         Tick(10000); AllStopped();
         assert(controller.GetStatus().find("physical_button_released") != std::string::npos);
+    }
+    ResetRuntime();
+    {
+        auto config = Config();
+        config.tilt_min_us = 1000; config.tilt_max_us = 2000;
+        config.tilt_min_angle = 80; config.tilt_max_angle = 100;
+        TurretController controller(config); assert(controller.Initialize());
+        controller.SetNetworkAvailable(true);
+        assert(!controller.SetTilt(79) && !controller.SetTilt(101));
+        assert(controller.SetTilt(80) && duties[5] == (1000 + 80 * 1000 / 180) * 16383 / 20000);
+        assert(controller.SetTilt(100) && duties[5] == (1000 + 100 * 1000 / 180) * 16383 / 20000);
+        Tick(2000); assert(duties[5] == 0 && controller.CanSleep());
     }
     ResetRuntime();
     {
@@ -112,7 +132,22 @@ int main() {
         assert(!controller.Initialize()); AllStopped();
         fail_timer = fail_task = false; fail_channel = -1;
         assert(!controller.Initialize() && !controller.Request(1)); // 故障保持，不能自动重启
+        assert(!controller.CanSleep());
         assert(controller.GetStatus().find("\"hardware_fault\":true") != std::string::npos);
+    }
+    ResetRuntime();
+    {
+        TurretController controller(Config()); assert(controller.Initialize());
+        controller.SetNetworkAvailable(true); Start(controller, 3); Tick(700);
+        controller.SetMaintenanceMode(true); AllStopped();
+        assert(!controller.CanSleep());
+        controller.SetNetworkAvailable(false); controller.SetNetworkAvailable(true);
+        assert(!controller.Request(1) && !controller.SetTilt(90) && !controller.ConfirmPhysical());
+        assert(controller.GetStatus().find("\"maintenance_mode\":true") != std::string::npos);
+        controller.SetMaintenanceMode(false); Tick(10000); AllStopped();
+        assert(controller.CanSleep());
+        assert(!controller.ConfirmPhysical());
+        assert(controller.Request(1)); controller.Disarm("test end"); AllStopped();
     }
     for (int failure = 0; failure < 4; ++failure) {
         ResetRuntime(); TurretController controller(Config()); assert(controller.Initialize());
@@ -143,6 +178,11 @@ int main() {
         Start(turret); app.SetMotorNetworkAvailable(false); AllStopped();
         app.SetMotorNetworkAvailable(true); Tick(20000); AllStopped();
         assert(!turret.ConfirmPhysical());
+        Start(turret); assert(app.HandleWebMotorControl(4, 80));
+        app.SetMotorMaintenanceMode(true); AllStopped();
+        app.SetMotorNetworkAvailable(false); app.SetMotorNetworkAvailable(true);
+        assert(!turret.Request(1) && !app.HandleWebMotorControl(4, 80));
+        app.SetMotorMaintenanceMode(false); Tick(30000); AllStopped();
     }
 #endif
     std::cout << "PASS: production turret adapter, build mode=" << CONFIG_CAR_TURRET_ENABLED

@@ -23,6 +23,11 @@ fi
 "${CXX:-c++}" "${flags[@]}" -I "$project_dir/firmware/main" \
   "$project_dir/tests/chassis/state_test.cc" -o "$scratch_dir/state_test"
 "$scratch_dir/state_test"
+"${CXX:-c++}" "${flags[@]}" -Wno-unused-variable \
+  -I "$project_dir/tests/chassis/stubs" -I "$project_dir/firmware/main" \
+  "$project_dir/tests/chassis/device_state_test.cc" "$project_dir/firmware/main/device_state_machine.cc" \
+  -o "$scratch_dir/device_state_test"
+"$scratch_dir/device_state_test"
 "${CC:-cc}" "${cflags[@]}" -Wno-deprecated-declarations -I "$cjson_dir" -c "$cjson_dir/cJSON.c" -o "$scratch_dir/cJSON.o"
 "${CXX:-c++}" "${flags[@]}" -Wno-unused-variable \
   -I "$project_dir/tests/chassis/stubs" -I "$project_dir/firmware/main" -I "$cjson_dir" \

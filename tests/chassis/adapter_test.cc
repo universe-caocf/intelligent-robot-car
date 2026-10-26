@@ -39,6 +39,21 @@ int main() {
     }
     ResetRuntime();
     {
+        Application app; app.SetMotorNetworkAvailable(true);
+        assert(app.HandleMotorActionWithDuration(4, 80, 1000));
+        app.SetMotorMaintenanceMode(true); AllStopped();
+        assert(!app.HandleWebMotorControl(4, 80));
+        assert(!app.HandleMotorActionWithDuration(4, 80, 1000));
+        app.SetMotorNetworkAvailable(false); app.SetMotorNetworkAvailable(true);
+        assert(!app.HandleMotorPattern("dance", 50));
+        assert(app.GetMotorStatus().find("\"maintenance_mode\":true") != std::string::npos);
+        assert(app.HandleMotorActionWithDuration(0, 0, 0));
+        app.SetMotorMaintenanceMode(false); Tick(10000); AllStopped();
+        assert(app.HandleWebMotorControl(4, 80));
+        assert(app.HandleMotorActionWithDuration(0, 0, 0)); AllStopped();
+    }
+    ResetRuntime();
+    {
         Application app; app.SetMotorNetworkAvailable(true); fail_task = true;
         assert(!app.HandleMotorActionWithDuration(4, 80, 1000)); AllStopped();
         assert(app.motor_task_handle_ == nullptr);

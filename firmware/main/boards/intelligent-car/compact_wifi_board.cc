@@ -284,9 +284,9 @@ private:
                 return std::string("Turret output disabled; pending request canceled; flywheel coast-down unmeasured");
             });
         mcp_server.AddTool("self.turret.set_tilt",
-            "Optional servo command angle 60..120, only when disarmed. Requires calibrated wiring. "
+            "Optional servo angle 0..180, limited by configured travel (default 60..120), only when disarmed. Requires calibrated wiring. "
             "Not measured barrel angle; no targeting or hit feedback.",
-            PropertyList({Property("angle", kPropertyTypeInteger, 60, 120)}),
+            PropertyList({Property("angle", kPropertyTypeInteger, 0, 180)}),
             [](const PropertyList& properties) -> ReturnValue {
                 if (!car::TurretController::GetInstance().SetTilt(properties["angle"].value<int>()))
                     throw std::runtime_error("Tilt rejected: check enabled hardware, optional servo and disarmed state");

@@ -61,8 +61,8 @@ bool Application::HandleMotorActionWithDuration(int direction, int speed, int du
 
 bool Application::HandleMotorSequence(const car::MotorStep* steps, size_t count) {
     std::lock_guard<std::mutex> lock(motor_mutex_);
-    if (!motor_network_available_ || motor_hardware_fault_ || !EnsureMotorTaskLocked()) {
-        ESP_LOGW(TAG, "Motor command rejected: network=%d fault=%d", motor_network_available_, motor_hardware_fault_);
+    if (!motor_network_available_ || motor_maintenance_mode_ || motor_hardware_fault_ || !EnsureMotorTaskLocked()) {
+        ESP_LOGW(TAG, "Motor command rejected: network=%d maintenance=%d fault=%d", motor_network_available_, motor_maintenance_mode_, motor_hardware_fault_);
         return false;
     }
     if (!motor_control_.Start(steps, count, esp_timer_get_time() / 1000)) return false;
@@ -92,7 +92,7 @@ bool Application::HandleWebMotorControl(int direction, int speed) {
     if (!car::MotorControl::ValidCommand(direction, speed)) return false;
     if (direction == 0 || speed == 0) { return StopMotorControl("web stop"); }
     std::lock_guard<std::mutex> lock(motor_mutex_);
-    if (!motor_network_available_ || motor_hardware_fault_ || !EnsureMotorTaskLocked()) return false;
+    if (!motor_network_available_ || motor_maintenance_mode_ || motor_hardware_fault_ || !EnsureMotorTaskLocked()) return false;
     // 心跳总是续期，不能因为方向和速度相同而丢弃。
     if (!motor_control_.WebCommand(direction, speed, esp_timer_get_time() / 1000)) return false;
     return ApplyMotorOutputLocked();
@@ -107,6 +107,15 @@ void Application::SetMotorNetworkAvailable(bool available) {
         StopMotorOutputLocked();
         ESP_LOGW(TAG, "Network unavailable: motor stopped and sequence cleared");
     }
+}
+
+void Application::SetMotorMaintenanceMode(bool active) {
+    // 维护锁独立于网络状态，防止升级/重启等待期间新请求或重连重新驱动输出。
+    car::TurretController::GetInstance().SetMaintenanceMode(active);
+    std::lock_guard<std::mutex> lock(motor_mutex_);
+    motor_maintenance_mode_ = active;
+    if (active) { motor_control_.Stop(); StopMotorOutputLocked(); }
+    ESP_LOGI(TAG, "Motor maintenance mode=%d; old commands never resume", active);
 }
 
 bool Application::StopMotorControl(const char* reason) {
@@ -211,6 +220,7 @@ std::string Application::GetMotorStatus() {
     cJSON_AddNumberToObject(status, "remaining_ms", std::max<int64_t>(0, motor_control_.deadline_ms() - esp_timer_get_time() / 1000));
     cJSON_AddNumberToObject(status, "pending_steps", motor_control_.pending_steps());
     cJSON_AddBoolToObject(status, "network_available", motor_network_available_);
+    cJSON_AddBoolToObject(status, "maintenance_mode", motor_maintenance_mode_);
     cJSON_AddBoolToObject(status, "hardware_fault", motor_hardware_fault_);
     cJSON_AddStringToObject(status, "feedback", "commanded_output_only_no_motion_sensor");
     char* json = cJSON_PrintUnformatted(status);

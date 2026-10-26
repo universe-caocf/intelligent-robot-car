@@ -52,6 +52,26 @@ config CAR_TURRET_RECOVER_MS
     int "Pusher return and inter-cycle time"
     default 450
     range 100 1000
+
+config CAR_TURRET_TILT_MIN_US
+    int "Tilt pulse at command angle 0 (requires calibration)"
+    default 500
+    range 500 2500
+
+config CAR_TURRET_TILT_MAX_US
+    int "Tilt pulse at command angle 180 (requires calibration)"
+    default 2500
+    range 500 2500
+
+config CAR_TURRET_TILT_MIN_ANGLE
+    int "Minimum allowed tilt command angle"
+    default 60
+    range 0 180
+
+config CAR_TURRET_TILT_MAX_ANGLE
+    int "Maximum allowed tilt command angle"
+    default 120
+    range 0 180
 endmenu
 
 config OTA_URL

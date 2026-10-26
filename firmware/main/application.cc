@@ -1,4 +1,5 @@
 #include "application.h"
+#include "turret_controller.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -125,13 +126,22 @@ void Application::Initialize() {
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         auto display = Board::GetInstance().GetDisplay();
+        // 避免延迟的激活/连接事件在配网期间重新抢占80端口。
+        if (event == NetworkEvent::Connected || event == NetworkEvent::Disconnected ||
+            event == NetworkEvent::Scanning || event == NetworkEvent::Connecting ||
+            event == NetworkEvent::WifiConfigModeEnter) {
+            std::lock_guard<std::mutex> lock(local_web_mutex_);
+            local_web_network_available_ = event == NetworkEvent::Connected;
+        }
         
         switch (event) {
             case NetworkEvent::Scanning:
+                SetMotorNetworkAvailable(false);
                 display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
             case NetworkEvent::Connecting: {
+                SetMotorNetworkAvailable(false);
                 if (data.empty()) {
                     // Cellular network - registering without carrier info yet
                     display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
@@ -182,6 +192,9 @@ void Application::Initialize() {
                 break;
         }
     });
+
+    // 本地调试不依赖OTA/激活，回调只在HTTP任务启动前注册一次。
+    ConfigureLocalWebServer();
 
     // Start network asynchronously
     board.StartNetwork();
@@ -318,6 +331,7 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    StartLocalWebServer();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -328,12 +342,17 @@ void Application::HandleNetworkConnectedEvent() {
             return;
         }
 
-        xTaskCreate([](void* arg) {
+        BaseType_t result = xTaskCreate([](void* arg) {
             Application* app = static_cast<Application*>(arg);
             app->ActivationTask();
             app->activation_task_handle_ = nullptr;
             vTaskDelete(NULL);
         }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        if (result != pdPASS) {
+            activation_task_handle_ = nullptr;
+            SetDeviceState(kDeviceStateStarting);
+            ESP_LOGE(TAG, "Activation task creation failed; local web remains available, reconnect to retry");
+        }
     }
 
     // Update the status bar immediately to show the network state
@@ -375,7 +394,15 @@ void Application::HandleActivationDoneEvent() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    // Start web server for remote control
+    // 若首次启动失败，激活后再尝试；成功启动时是幂等操作。
+    StartLocalWebServer();
+}
+
+void Application::ConfigureLocalWebServer() {
+    web_server_->SetTurretCallbacks(
+        []() { return car::TurretController::GetInstance().GetStatus(); },
+        [](int count) { return car::TurretController::GetInstance().Request(count); },
+        []() { return car::TurretController::GetInstance().Disarm("web disarm"); });
     web_server_->SetMotorControlCallback([this](int direction, int speed) {
         return HandleWebMotorControl(direction, speed);
     });
@@ -392,6 +419,19 @@ void Application::HandleActivationDoneEvent() {
         [this](const MotorActionConfig& config) { SetMotorActionConfig(config); }
     );
 
+}
+
+void Application::PrepareForWifiConfig() {
+    std::lock_guard<std::mutex> lock(local_web_mutex_);
+    local_web_network_available_ = false;
+    SetMotorNetworkAvailable(false);
+    web_server_->Stop();
+}
+
+void Application::StartLocalWebServer() {
+    std::lock_guard<std::mutex> lock(local_web_mutex_);
+    if (!local_web_network_available_) return;
+    auto display = Board::GetInstance().GetDisplay();
     if (web_server_->Start(80)) {
         ESP_LOGI(TAG, "Web server started successfully on port 80");
         display->ShowNotification("Web控制已启用", 2000);
@@ -440,6 +480,7 @@ void Application::CheckAssetsVersion() {
     std::string download_url = settings.GetString("download_url");
 
     if (!download_url.empty()) {
+        SetMotorMaintenanceMode(true);
         settings.EraseKey("download_url");
 
         char message[256];
@@ -467,12 +508,17 @@ void Application::CheckAssetsVersion() {
             Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
+            SetMotorMaintenanceMode(false);
             return;
         }
     }
 
     // Apply assets
     assets.Apply();
+    if (!download_url.empty()) {
+        SetDeviceState(kDeviceStateActivating);
+        SetMotorMaintenanceMode(false);
+    }
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
 }
@@ -1063,6 +1109,7 @@ void Application::SetListeningMode(ListeningMode mode) {
 }
 
 void Application::Reboot() {
+    SetMotorMaintenanceMode(true);
     StopMotorControl("reboot");
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
@@ -1077,6 +1124,8 @@ void Application::Reboot() {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+    const auto previous_state = GetDeviceState();
+    SetMotorMaintenanceMode(true);
     StopMotorControl("firmware upgrade");
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -1121,6 +1170,8 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
+        SetDeviceState(previous_state == kDeviceStateActivating ? kDeviceStateActivating : kDeviceStateIdle);
+        SetMotorMaintenanceMode(false);
         return false;
     } else {
         // Upgrade success, reboot immediately
@@ -1179,6 +1230,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
+    if (!car::TurretController::GetInstance().CanSleep()) return false;
     {
         std::lock_guard<std::mutex> lock(motor_mutex_);
         if (motor_control_.source() != car::MotorSource::None) return false;

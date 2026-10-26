@@ -145,6 +145,8 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
+    // 配网服务也使用80端口，进入配网前先停止动作和本地遥控服务。
+    void PrepareForWifiConfig();
 
 private:
     Application();
@@ -172,6 +174,8 @@ private:
 
     // Web server for remote control
     std::unique_ptr<WebServer> web_server_;
+    std::mutex local_web_mutex_;
+    bool local_web_network_available_ = false;
 
     MotorActionConfig motor_action_config_;
     std::mutex motor_config_mutex_;
@@ -181,6 +185,7 @@ private:
     car::MotorControl motor_control_;
     TaskHandle_t motor_task_handle_ = nullptr;
     bool motor_network_available_ = false;
+    bool motor_maintenance_mode_ = false;
     bool motor_pwm_initialized_ = false;
     bool motor_hardware_fault_ = false;
     int applied_motor_direction_ = 0;
@@ -191,6 +196,9 @@ private:
     void StopMotorOutputLocked();
     bool StopMotorControl(const char* reason);
     void SetMotorNetworkAvailable(bool available);
+    void SetMotorMaintenanceMode(bool active);
+    void ConfigureLocalWebServer();
+    void StartLocalWebServer();
 
     // Event handlers
     void HandleStateChangedEvent();

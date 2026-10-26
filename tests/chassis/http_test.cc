@@ -2,15 +2,18 @@
 #include "web_server/web_server.h"
 #include "application.h"
 #include "cJSON.h"
+#include "turret_control.h"
 #include <cassert>
 #include <iostream>
-httpd_req_t Request(const std::string& path, const std::string& body, int method = HTTP_POST, bool receive_error = false) {
+httpd_req_t Request(const std::string& path, const std::string& body, int method = HTTP_POST, bool receive_error = false,
+                    std::map<std::string, std::string> headers = {}) {
     auto entry = routes.at({path, method});
     httpd_req_t req;
     req.user_ctx = entry.user_ctx;
     req.body = body;
     req.content_len = body.size();
     req.receive_error = receive_error;
+    req.headers = std::move(headers);
     entry.handler(&req);
     return req;
 }
@@ -18,6 +21,12 @@ int main() {
     WebServer server;
     auto& app = Application::GetInstance();
     int web_calls = 0, config_writes = 0;
+    car::TurretControl turret(true);
+    bool turret_available = false;
+    server.SetTurretCallbacks(
+        [&]() { return std::string(R"({"state":")") + car::TurretControl::StateName(turret.state()) + R"("})"; },
+        [&](int count) { return turret_available && turret.Request(count, 0); },
+        [&]() { turret.Disarm(); return true; });
     server.SetMotorControlCallback([&](int direction, int speed) {
         ++web_calls;
         return app.available && app.motor.WebCommand(direction, speed, app.now);
@@ -25,7 +34,19 @@ int main() {
     server.SetMotorActionConfigCallback([&]() { return app.config; }, [&](const car::MotorActionConfig& config) {
         ++config_writes; app.config = config;
     });
-    assert(server.Start() && routes.size() == 10);
+    assert(!server.Start(0) && !server.Start(65536) && http_starts == 0);
+    assert(server.Start() && routes.size() == 13);
+    assert(server.Start() && http_starts == 1 && !server.Start(81));
+    int calls_before_origin = web_calls;
+    for (const std::string& path : {"/api/turret/prepare", "/api/turret/disarm", "/control", "/api/control", "/api/motor/action", "/api/debug/motor_test", "/config", "/api/config"}) {
+        auto cross_site = Request(path, "{}", HTTP_POST, false, {{"Origin", "http://other.example"}, {"Host", "192.0.2.1"}});
+        assert(cross_site.status == 403 && cross_site.offset == 0);
+    }
+    assert(web_calls == calls_before_origin && config_writes == 0);
+    assert(Request("/api/control", R"({"direction":0,"speed":0})", HTTP_POST, false,
+        {{"Origin", "http://192.0.2.1"}, {"Host", "192.0.2.1"}}).status == 200);
+    assert(Request("/api/control", "{}", HTTP_POST, false, {{"Origin", "null"}}).status == 403);
+    assert(Request("/api/control", "{}", HTTP_POST, false, {{"Origin", std::string(200, 'a')}}).status == 403);
     assert(Request("/api/control", R"({"direction":4,"speed":80})").status == 200);
     assert(app.motor.direction() == 4 && app.motor.deadline_ms() == 750);
     app.now = 600;
@@ -83,5 +104,25 @@ int main() {
     assert(json && cJSON_GetObjectItem(json, "wiggle_ms")->valueint == 800);
     assert(cJSON_GetObjectItem(json, "quick_fwd_ms")->valueint == 500);
     cJSON_Delete(json);
+    assert(Request("/api/turret/status", "", HTTP_GET).response.find("disarmed") != std::string::npos);
+    assert(Request("/api/turret/prepare", R"({"count":1})").status == 503);
+    turret_available = true;
+    for (const auto& body : {R"({"count":0})", R"({"count":4})", R"({"count":1.5})", R"({"count":"1"})", "[]"}) {
+        assert(Request("/api/turret/prepare", body).status == 400);
+    }
+    auto prepared = Request("/api/turret/prepare", R"({"count":3})");
+    assert(prepared.status == 200 && prepared.response.find("awaiting_confirmation") != std::string::npos && !turret.flywheel());
+    assert(Request("/api/turret/prepare", "{}").status == 503);
+    assert(Request("/api/turret/disarm", "[]").status == 400);
+    assert(Request("/api/turret/disarm", "{}").status == 200 && turret.state() == car::TurretState::Disarmed);
+    assert(routes.count({"/api/turret/confirm", HTTP_POST}) == 0);
+    server.Stop();
+    http_fail_start = true; assert(!server.Start() && routes.empty());
+    http_fail_start = false;
+    for (int i = 0; i < 13; ++i) {
+        http_fail_route = i; assert(!server.Start() && routes.empty());
+        http_fail_route = -1; assert(server.Start() && routes.size() == 13);
+        server.Stop();
+    }
     std::cout << "PASS: production HTTP handlers, fragmented bodies, validation, heartbeat, debug replacement, status, partial config\n";
 }
